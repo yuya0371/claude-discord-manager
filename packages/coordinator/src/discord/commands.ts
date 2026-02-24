@@ -60,8 +60,8 @@ export class CommandHandler {
     const commandName = interaction.commandName;
 
     switch (commandName) {
-      case "ask":
-        await this.handleAsk(interaction);
+      case "task":
+        await this.handleTask(interaction);
         break;
       case "workers":
         await this.handleWorkers(interaction);
@@ -83,9 +83,9 @@ export class CommandHandler {
   // --- Command definitions ---
 
   private buildCommands(): SlashCommandBuilder[] {
-    const askCmd = new SlashCommandBuilder()
-      .setName("ask")
-      .setDescription("Claudeに質問・作業を依頼する")
+    const taskCmd = new SlashCommandBuilder()
+      .setName("task")
+      .setDescription("Claudeにタスクを依頼する")
       .addStringOption((option) =>
         option
           .setName("prompt")
@@ -152,12 +152,12 @@ export class CommandHandler {
           .setRequired(true)
       ) as SlashCommandBuilder;
 
-    return [askCmd, workersCmd, statusCmd, cancelCmd];
+    return [taskCmd, workersCmd, statusCmd, cancelCmd];
   }
 
   // --- Command handlers ---
 
-  private async handleAsk(
+  private async handleTask(
     interaction: ChatInputCommandInteraction
   ): Promise<void> {
     const prompt = interaction.options.getString("prompt", true);

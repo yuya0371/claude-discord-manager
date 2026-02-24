@@ -117,7 +117,7 @@ export class DiscordBot {
   private setupTaskCallbacks(): void {
     this.taskManager.callbacks = {
       onTaskQueued: async (task) => {
-        // Embed投稿はcommands.tsのhandleAsk内で実施済み
+        // Embed投稿はcommands.tsのhandleTask内で実施済み
       },
       onTaskStarted: async (task) => {
         await this.updateTaskEmbed(task);

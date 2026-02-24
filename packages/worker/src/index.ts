@@ -1,6 +1,12 @@
 // packages/worker/src/index.ts
 
-import "dotenv/config";
+import dotenv from "dotenv";
+import { fileURLToPath } from "node:url";
+
+// ルートの .env を明示的に読み込む
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
+
 import {
   type WsMessage,
   type TaskAssignPayload,
@@ -259,9 +265,12 @@ class WorkerApp {
     }
 
     // task:stream として Coordinator に送信
+    // token_usage の場合は累積値を送信する（Coordinator 側は上書きで受け取る）
     const streamPayload: TaskStreamPayload = {
       eventType: event.eventType,
-      data: event.data,
+      data: event.eventType === "token_usage"
+        ? { ...this.accumulatedTokens }
+        : event.data,
     };
     this.wsClient.send("task:stream", streamPayload, this.currentTaskId);
   }
