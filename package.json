@@ -1,0 +1,30 @@
+{
+  "name": "claude-discord-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code Discord Manager - Discordから Claude Code CLI をリモート操作",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "build:common": "npm run build -w packages/common",
+    "build:coordinator": "npm run build -w packages/coordinator",
+    "build:worker": "npm run build -w packages/worker",
+    "start:coordinator": "npm run start -w packages/coordinator",
+    "start:worker": "npm run start -w packages/worker",
+    "dev:coordinator": "npm run dev -w packages/coordinator",
+    "dev:worker": "npm run dev -w packages/worker",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:common": "vitest run --project common",
+    "lint": "eslint packages/*/src/**/*.ts",
+    "clean": "rm -rf packages/*/dist"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}
