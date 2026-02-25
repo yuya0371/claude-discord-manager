@@ -89,7 +89,7 @@ export class TaskManager {
       id: taskId,
       prompt: options.prompt,
       status: TaskStatus.Queued,
-      workerId: null,
+      workerId: options.workerId ?? null,
       cwd: options.cwd ?? null,
       permissionMode: options.permissionMode ?? PermissionMode.AcceptEdits,
       teamMode: options.teamMode ?? false,
@@ -134,8 +134,8 @@ export class TaskManager {
       return;
     }
 
-    // 利用可能なWorkerを探す
-    const worker = this.workerRegistry.getAvailableWorker();
+    // 利用可能なWorkerを探す（タスクに指定ワーカーがあれば優先）
+    const worker = this.workerRegistry.getAvailableWorker(task.workerId);
     if (!worker) return;
 
     // キューから取り出す
