@@ -1,6 +1,7 @@
 import {
   SlashCommandBuilder,
   ChatInputCommandInteraction,
+  AutocompleteInteraction,
   REST,
   Routes,
 } from "discord.js";
@@ -63,6 +64,23 @@ export class CommandHandler {
     console.log(
       `Registered ${commandData.length} slash commands for guild ${guildId}`
     );
+  }
+
+  /**
+   * オートコンプリートをハンドリングする
+   */
+  async handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
+    const focused = interaction.options.getFocused(true);
+
+    if (focused.name === "worker") {
+      const workers = this.workerRegistry.getAllWorkers();
+      const input = focused.value.toLowerCase();
+      const choices = workers
+        .map((w) => ({ name: `${w.name} (${w.status})`, value: w.name }))
+        .filter((c) => c.value.toLowerCase().includes(input))
+        .slice(0, 25);
+      await interaction.respond(choices);
+    }
   }
 
   /**
@@ -135,6 +153,7 @@ export class CommandHandler {
           .setName("worker")
           .setDescription("実行先Worker名")
           .setRequired(false)
+          .setAutocomplete(true)
       )
       .addStringOption((option) =>
         option

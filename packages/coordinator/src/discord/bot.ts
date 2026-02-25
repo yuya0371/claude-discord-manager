@@ -204,6 +204,8 @@ export class DiscordBot {
       try {
         if (interaction.isChatInputCommand()) {
           await this.commandHandler!.handleInteraction(interaction);
+        } else if (interaction.isAutocomplete()) {
+          await this.commandHandler!.handleAutocomplete(interaction);
         } else if (interaction.isButton()) {
           await this.buttonHandler!.handleButton(interaction);
         } else if (interaction.isModalSubmit()) {
