@@ -16,6 +16,8 @@ import {
   buildTaskEmbed,
   buildWorkerConnectedEmbed,
   buildWorkerDisconnectedEmbed,
+  isLongResult,
+  splitTextForDiscord,
 } from "./embeds.js";
 import { TaskManager } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
@@ -157,6 +159,10 @@ export class DiscordBot {
         await this.updateTaskEmbed(task);
       },
       onTaskCompleted: async (task) => {
+        // 長文の場合はスレッド作成 → 全文投稿 → Embed再更新
+        if (isLongResult(task.resultText)) {
+          await this.handleLongResultOutput(task);
+        }
         await this.updateTaskEmbed(task);
       },
       onTaskFailed: async (task) => {
@@ -208,6 +214,45 @@ export class DiscordBot {
       await message.edit({ embeds: [embed] });
     } catch (error) {
       console.error(`Failed to update task embed for ${task.id}:`, error);
+    }
+  }
+
+  /**
+   * 長文結果をスレッドに投稿する
+   */
+  private async handleLongResultOutput(task: Task): Promise<void> {
+    if (!task.discordMessageId || !task.resultText) return;
+
+    try {
+      const channel = this.client.channels.cache.get(this.statusChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const textChannel = channel as TextChannel;
+      const message = await textChannel.messages
+        .fetch(task.discordMessageId)
+        .catch(() => null);
+      if (!message) return;
+
+      // スレッドを作成
+      const thread = await message.startThread({
+        name: `${task.id} - Full Output`,
+      });
+
+      // タスクにスレッドIDを記録
+      this.taskManager.setDiscordThreadId(task.id, thread.id);
+
+      // 全文を分割して投稿
+      const chunks = splitTextForDiscord(task.resultText);
+      for (let i = 0; i < chunks.length; i++) {
+        const header =
+          chunks.length > 1 ? `**[${i + 1}/${chunks.length}]**\n` : "";
+        await thread.send(header + chunks[i]);
+      }
+    } catch (error) {
+      console.error(
+        `Failed to create thread for long output (${task.id}):`,
+        error
+      );
     }
   }
 

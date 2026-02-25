@@ -5,7 +5,13 @@ import {
   WorkerInfo,
   WorkerStatus,
   DISCORD_EMBED_MAX_LENGTH,
+  DISCORD_MESSAGE_MAX_LENGTH,
 } from "@claude-discord/common";
+
+/** 長文判定の閾値 */
+const LONG_TEXT_THRESHOLD = DISCORD_MESSAGE_MAX_LENGTH;
+/** Embedの要約表示文字数 */
+const SUMMARY_LENGTH = 500;
 
 /**
  * タスクステータスのEmbed生成ヘルパー
@@ -82,8 +88,22 @@ export function buildTaskEmbed(task: Task): EmbedBuilder {
 
   // 結果テキスト（ステータスがcompleted/failedの場合）
   if (task.status === TaskStatus.Completed && task.resultText) {
-    const resultDisplay = truncateText(task.resultText, 1024);
-    embed.addFields({ name: "Result", value: resultDisplay });
+    if (task.resultText.length > LONG_TEXT_THRESHOLD) {
+      // 長文: 要約表示 + スレッド案内
+      const summary = task.resultText.substring(0, SUMMARY_LENGTH) + "...";
+      const note = task.discordThreadId
+        ? "\n\n_Full output available in thread below._"
+        : "";
+      embed.addFields({
+        name: "Result (summary)",
+        value: truncateText(summary + note, 1024),
+      });
+    } else {
+      embed.addFields({
+        name: "Result",
+        value: truncateText(task.resultText, 1024),
+      });
+    }
   }
 
   if (task.status === TaskStatus.Failed && task.errorMessage) {
@@ -249,6 +269,49 @@ export function buildHelpEmbed(): EmbedBuilder {
       }
     )
     .setTimestamp();
+}
+
+/**
+ * 結果テキストが長文か判定する
+ */
+export function isLongResult(text: string | null): boolean {
+  if (!text) return false;
+  return text.length > LONG_TEXT_THRESHOLD;
+}
+
+/**
+ * 長文テキストをDiscordメッセージの最大長に合わせて分割する
+ * コードブロック内で分割されないよう考慮する
+ */
+export function splitTextForDiscord(text: string): string[] {
+  const maxLen = DISCORD_MESSAGE_MAX_LENGTH;
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // 改行位置で分割を試みる
+    let splitAt = remaining.lastIndexOf("\n", maxLen);
+    if (splitAt <= 0 || splitAt < maxLen * 0.5) {
+      // 改行が見つからないか遠すぎる場合はmaxLenで切る
+      splitAt = maxLen;
+    }
+
+    chunks.push(remaining.substring(0, splitAt));
+    remaining = remaining.substring(splitAt);
+    // 先頭の改行を除去
+    if (remaining.startsWith("\n")) {
+      remaining = remaining.substring(1);
+    }
+  }
+
+  return chunks;
 }
 
 /**
