@@ -74,6 +74,18 @@ export class StreamJsonParser {
         };
       }
 
+      // Claude CLI が AskUserQuestion を呼び出した場合（ユーザーへの質問）
+      // stream-json では type: "tool_use" で name: "AskUserQuestion" として出力されるが、
+      // 別のフォーマットで出力される可能性にも対応
+      case "ask_user": {
+        const question = (json.question as string) ?? (json.text as string) ?? "";
+        const options = (json.options as string[]) ?? null;
+        return {
+          eventType: "tool_use_begin",
+          data: { toolName: "AskUserQuestion", summary: `Question: ${question.substring(0, 80)}` },
+        };
+      }
+
       case "tool_result": {
         const toolName = ((json.tool_name ?? json.name ?? "unknown") as string);
         const isError = json.is_error as boolean | undefined;
@@ -130,6 +142,11 @@ export class StreamJsonParser {
         return `Grep: "${input.pattern ?? ""}" ${input.path ?? ""}`;
       case "Glob":
         return `Glob: ${input.pattern ?? "unknown"}`;
+      case "AskUserQuestion": {
+        // Claude CLI の AskUserQuestion ツール: input.question に質問テキストが入る
+        const question = (input.question as string) ?? (input.text as string) ?? "";
+        return `Question: ${question.substring(0, 200)}`;
+      }
       default:
         return toolName;
     }

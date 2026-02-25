@@ -9,6 +9,7 @@ import {
   TaskErrorPayload,
   TaskQuestionPayload,
   TaskPermissionPayload,
+  FileTransferAckPayload,
   parseMessage,
 } from "@claude-discord/common";
 import { WorkerRegistry } from "../worker/registry.js";
@@ -196,6 +197,15 @@ export class WsServer {
           await this.taskManager.handleTaskPermission(
             msg.taskId,
             msg.payload as TaskPermissionPayload
+          );
+        }
+        break;
+
+      case "file:transfer_ack":
+        if (msg.taskId) {
+          this.taskManager.handleFileTransferAck(
+            msg.taskId,
+            msg.payload as FileTransferAckPayload
           );
         }
         break;

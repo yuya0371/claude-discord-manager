@@ -5,6 +5,7 @@ import {
   TokenUsage,
   ToolHistoryEntry,
   WorkerStatus,
+  FileAttachment,
   TaskAssignPayload,
   TaskStreamPayload,
   TaskCompletePayload,
@@ -12,6 +13,8 @@ import {
   TaskCancelPayload,
   TaskQuestionPayload,
   TaskPermissionPayload,
+  FileTransferPayload,
+  FileTransferAckPayload,
   createMessage,
   TASK_DEFAULT_TIMEOUT_MS,
   DISCORD_STATUS_UPDATE_INTERVAL_MS,
@@ -28,6 +31,7 @@ export interface TaskCreateOptions {
   teamMode?: boolean;
   continueSession?: boolean;
   sessionId?: string | null;
+  attachments?: FileAttachment[];
 }
 
 /**
@@ -63,6 +67,12 @@ export class TaskManager {
   /** イベントコールバック */
   public callbacks: TaskEventCallbacks | null = null;
 
+  /** file:transfer_ack の待機中 resolve コールバック */
+  private fileTransferResolvers: Map<
+    string,
+    (ack: FileTransferAckPayload) => void
+  > = new Map();
+
   constructor(
     private readonly queue: TaskQueue,
     private readonly workerRegistry: WorkerRegistry
@@ -85,7 +95,7 @@ export class TaskManager {
       teamMode: options.teamMode ?? false,
       continueSession: options.continueSession ?? false,
       sessionId: options.sessionId ?? null,
-      attachments: [],
+      attachments: options.attachments ?? [],
       toolHistory: [],
       resultText: null,
       errorMessage: null,
@@ -139,6 +149,16 @@ export class TaskManager {
     // Worker状態をbusyに
     this.workerRegistry.setWorkerStatus(worker.id, WorkerStatus.Busy);
     this.workerRegistry.setWorkerCurrentTask(worker.id, taskId);
+
+    // 添付ファイルがある場合、ダウンロード→Worker転送
+    if (task.attachments.length > 0) {
+      try {
+        await this.transferAttachments(task, worker.id);
+      } catch (err) {
+        console.error(`Failed to transfer attachments for ${taskId}:`, err);
+        // 転送失敗でもタスクは実行する（添付なしで）
+      }
+    }
 
     // タスク割り当てメッセージを送信
     const assignMsg = createMessage<TaskAssignPayload>(
@@ -473,6 +493,21 @@ export class TaskManager {
     }
   }
 
+  /**
+   * Worker からの file:transfer_ack を処理
+   */
+  handleFileTransferAck(
+    taskId: string,
+    payload: FileTransferAckPayload
+  ): void {
+    const key = `${taskId}:${payload.fileName}`;
+    const resolver = this.fileTransferResolvers.get(key);
+    if (resolver) {
+      resolver(payload);
+      this.fileTransferResolvers.delete(key);
+    }
+  }
+
   // --- Private methods ---
 
   private setTaskTimeout(taskId: string): void {
@@ -525,6 +560,90 @@ export class TaskManager {
       this.updateTimers.delete(taskId);
     }
     this.lastUpdateTime.delete(taskId);
+  }
+
+  /**
+   * 添付ファイルをDiscord CDNからダウンロードし、Workerに転送する
+   */
+  private async transferAttachments(
+    task: Task,
+    workerId: string
+  ): Promise<void> {
+    for (const attachment of task.attachments) {
+      // Discord CDN からダウンロード
+      const response = await fetch(attachment.cdnUrl);
+      if (!response.ok) {
+        console.error(
+          `Failed to download attachment "${attachment.fileName}": ${response.status}`
+        );
+        continue;
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const base64Data = Buffer.from(arrayBuffer).toString("base64");
+
+      // file:transfer メッセージを送信
+      const transferMsg = createMessage<FileTransferPayload>(
+        "file:transfer",
+        {
+          taskId: task.id,
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          size: attachment.size,
+          data: base64Data,
+        },
+        { taskId: task.id, workerId }
+      );
+
+      this.workerRegistry.sendToWorker(workerId, transferMsg);
+
+      // file:transfer_ack を待つ（10秒タイムアウト）
+      const ack = await this.waitForFileTransferAck(
+        task.id,
+        attachment.fileName,
+        10_000
+      );
+
+      if (ack.success && ack.localPath) {
+        attachment.localPath = ack.localPath;
+        console.log(
+          `File "${attachment.fileName}" transferred to worker, path: ${ack.localPath}`
+        );
+      } else {
+        console.error(
+          `File transfer failed for "${attachment.fileName}": ${ack.error ?? "unknown"}`
+        );
+      }
+    }
+  }
+
+  /**
+   * file:transfer_ack を待機する
+   */
+  private waitForFileTransferAck(
+    taskId: string,
+    fileName: string,
+    timeoutMs: number
+  ): Promise<FileTransferAckPayload> {
+    return new Promise((resolve) => {
+      const key = `${taskId}:${fileName}`;
+
+      const timer = setTimeout(() => {
+        this.fileTransferResolvers.delete(key);
+        resolve({
+          taskId,
+          fileName,
+          success: false,
+          localPath: null,
+          error: "File transfer ack timed out",
+        });
+      }, timeoutMs);
+
+      this.fileTransferResolvers.set(key, (ack) => {
+        clearTimeout(timer);
+        resolve(ack);
+      });
+    });
   }
 
   /**

@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import crypto from "node:crypto";
 import {
   type WsMessage,
   type TaskAssignPayload,
@@ -15,6 +16,8 @@ import {
   type TaskCompletePayload,
   type TaskErrorPayload,
   type FileTransferAckPayload,
+  type TaskQuestionPayload,
+  type ToolUseBeginData,
   type TokenUsage,
   WorkerStatus,
   PermissionMode,
@@ -336,6 +339,14 @@ class WorkerApp {
       this.lastSessionId = data.sessionId;
     }
 
+    // AskUserQuestion ツール検知: task:question を Coordinator に送信
+    if (event.eventType === "tool_use_begin") {
+      const data = event.data as ToolUseBeginData;
+      if (data.toolName === "AskUserQuestion") {
+        this.sendQuestionToCoordinator(data.summary);
+      }
+    }
+
     // task:stream として Coordinator に送信
     // token_usage の場合は累積値を送信する（Coordinator 側は上書きで受け取る）
     const streamPayload: TaskStreamPayload = {
@@ -345,6 +356,26 @@ class WorkerApp {
         : event.data,
     };
     this.wsClient.send("task:stream", streamPayload, this.currentTaskId);
+  }
+
+  /** AskUserQuestion を検知したときに task:question メッセージを送信する */
+  private sendQuestionToCoordinator(summary: string): void {
+    if (!this.currentTaskId) return;
+
+    // summary から質問テキストを抽出（"Question: ..." プレフィクスを除去）
+    const question = summary.startsWith("Question: ")
+      ? summary.substring("Question: ".length)
+      : summary;
+
+    const questionId = crypto.randomUUID();
+    const questionPayload: TaskQuestionPayload = {
+      question,
+      options: null,
+      questionId,
+    };
+
+    console.log(`[Worker] AskUserQuestion detected, sending task:question (id=${questionId})`);
+    this.wsClient.send("task:question", questionPayload, this.currentTaskId);
   }
 
   /** プロセス正常/異常終了 */
@@ -377,6 +408,9 @@ class WorkerApp {
       console.error(`[Worker] Task ${taskId} failed: code=${code}, signal=${signal}`);
     }
 
+    // 一時ファイルのクリーンアップ
+    this.cleanupTempFiles(taskId);
+
     this.currentTaskId = null;
     this.wsClient.setStatus(WorkerStatus.Online, null);
   }
@@ -395,8 +429,24 @@ class WorkerApp {
     };
     this.wsClient.send("task:error", payload, taskId);
 
+    // 一時ファイルのクリーンアップ
+    this.cleanupTempFiles(taskId);
+
     this.currentTaskId = null;
     this.wsClient.setStatus(WorkerStatus.Online, null);
+  }
+
+  /** タスク用一時ファイルを削除する */
+  private cleanupTempFiles(taskId: string): void {
+    const tmpDir = path.join(os.tmpdir(), "claude-worker-files", taskId);
+    try {
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        console.log(`[Worker] Cleaned up temp files for ${taskId}`);
+      }
+    } catch (err) {
+      console.warn(`[Worker] Failed to cleanup temp files for ${taskId}:`, (err as Error).message);
+    }
   }
 }
 

@@ -4,7 +4,12 @@ import {
   REST,
   Routes,
 } from "discord.js";
-import { PermissionMode, TaskStatus } from "@claude-discord/common";
+import {
+  PermissionMode,
+  TaskStatus,
+  FileAttachment,
+  FILE_MAX_SIZE_BYTES,
+} from "@claude-discord/common";
 import { TaskManager, TaskCreateOptions } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
 import { buildTaskEmbed, buildWorkersEmbed, buildHelpEmbed } from "./embeds.js";
@@ -129,6 +134,12 @@ export class CommandHandler {
           .setName("continue")
           .setDescription("前回セッションを継続")
           .setRequired(false)
+      )
+      .addAttachmentOption((option) =>
+        option
+          .setName("attachment")
+          .setDescription("添付ファイル（8MB以下）")
+          .setRequired(false)
       ) as SlashCommandBuilder;
 
     const workersCmd = new SlashCommandBuilder()
@@ -174,15 +185,38 @@ export class CommandHandler {
     const teamMode = interaction.options.getBoolean("team") ?? false;
     const continueSession =
       interaction.options.getBoolean("continue") ?? false;
+    const discordAttachment = interaction.options.getAttachment("attachment");
 
     let permissionMode: PermissionMode = PermissionMode.AcceptEdits;
     if (modeStr) {
       permissionMode = modeStr as PermissionMode;
     }
 
+    // 添付ファイルのサイズ検証
+    const attachments: FileAttachment[] = [];
+    if (discordAttachment) {
+      if (discordAttachment.size > FILE_MAX_SIZE_BYTES) {
+        await interaction.reply({
+          content: `Attachment "${discordAttachment.name}" is too large (${Math.round(discordAttachment.size / 1024 / 1024)}MB). Max: ${FILE_MAX_SIZE_BYTES / 1024 / 1024}MB.`,
+          ephemeral: true,
+        });
+        return;
+      }
+      attachments.push({
+        fileName: discordAttachment.name,
+        mimeType: discordAttachment.contentType ?? "application/octet-stream",
+        size: discordAttachment.size,
+        cdnUrl: discordAttachment.url,
+        localPath: null,
+      });
+    }
+
     // エフェメラルで即座に応答
+    const attachNote = attachments.length > 0
+      ? ` (with ${attachments.length} file)`
+      : "";
     await interaction.reply({
-      content: `Task accepted: "${prompt.substring(0, 100)}${prompt.length > 100 ? "..." : ""}"`,
+      content: `Task accepted${attachNote}: "${prompt.substring(0, 100)}${prompt.length > 100 ? "..." : ""}"`,
       ephemeral: true,
     });
 
@@ -194,6 +228,7 @@ export class CommandHandler {
       permissionMode,
       teamMode,
       continueSession,
+      attachments,
     };
 
     const task = this.taskManager.createTask(options);

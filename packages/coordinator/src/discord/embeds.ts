@@ -235,6 +235,7 @@ export function buildHelpEmbed(): EmbedBuilder {
           "`mode`: 権限モード (acceptEdits / auto / confirm)",
           "`team`: Agent Teamsモードで実行",
           "`continue`: 前回セッションを継続",
+          "`attachment`: 添付ファイル（8MB以下）",
         ].join("\n"),
       },
       {

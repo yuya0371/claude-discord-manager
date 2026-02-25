@@ -10,6 +10,7 @@ import {
   TextChannel,
   EmbedBuilder,
   Colors,
+  Message,
 } from "discord.js";
 import {
   TaskQuestionPayload,
@@ -21,10 +22,19 @@ import {
 import { WorkerRegistry } from "../worker/registry.js";
 import { TaskManager } from "../task/manager.js";
 
+/** 質問応答のタイムアウト (5分) */
+const QUESTION_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** 権限確認のタイムアウト (3分) */
+const PERMISSION_TIMEOUT_MS = 3 * 60 * 1000;
+
 /**
  * ボタンインタラクション（権限確認・質問応答）のハンドラ
  */
 export class ButtonHandler {
+  /** タイムアウトタイマー管理: key = `question:${taskId}:${questionId}` or `permission:${taskId}:${permissionId}` */
+  private readonly timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   constructor(
     private readonly taskManager: TaskManager,
     private readonly workerRegistry: WorkerRegistry,
@@ -44,7 +54,10 @@ export class ButtonHandler {
       .setColor(Colors.Orange)
       .setTitle(`[Question] Task ${taskId}`)
       .setDescription(payload.question)
+      .setFooter({ text: `${QUESTION_TIMEOUT_MS / 60000}分以内に回答してください` })
       .setTimestamp();
+
+    let sentMessage: Message;
 
     if (payload.options && payload.options.length > 0) {
       // 選択肢ボタンを生成
@@ -59,7 +72,7 @@ export class ButtonHandler {
             .setStyle(ButtonStyle.Primary)
         );
       }
-      await channel.send({ embeds: [embed], components: [row] });
+      sentMessage = await channel.send({ embeds: [embed], components: [row] });
     } else {
       // 自由入力用ボタン
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -70,8 +83,11 @@ export class ButtonHandler {
           .setLabel("回答を入力")
           .setStyle(ButtonStyle.Primary)
       );
-      await channel.send({ embeds: [embed], components: [row] });
+      sentMessage = await channel.send({ embeds: [embed], components: [row] });
     }
+
+    // タイムアウトタイマーを設定
+    this.startQuestionTimeout(taskId, payload.questionId, sentMessage);
   }
 
   /**
@@ -91,6 +107,7 @@ export class ButtonHandler {
         { name: "Command", value: "```\n" + payload.command + "\n```" },
         { name: "CWD", value: payload.cwd, inline: true }
       )
+      .setFooter({ text: `${PERMISSION_TIMEOUT_MS / 60000}分以内に応答してください` })
       .setTimestamp();
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -108,7 +125,10 @@ export class ButtonHandler {
         .setStyle(ButtonStyle.Danger)
     );
 
-    await channel.send({ embeds: [embed], components: [row] });
+    const sentMessage = await channel.send({ embeds: [embed], components: [row] });
+
+    // タイムアウトタイマーを設定
+    this.startPermissionTimeout(taskId, payload.permissionId, sentMessage);
   }
 
   /**
@@ -166,6 +186,96 @@ export class ButtonHandler {
     }
   }
 
+  /**
+   * 全タイムアウトタイマーをクリアする（シャットダウン時用）
+   */
+  clearAllTimeouts(): void {
+    for (const timer of this.timeoutTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.timeoutTimers.clear();
+  }
+
+  // --- Timeout management ---
+
+  /** 質問応答のタイムアウトタイマーを開始する */
+  private startQuestionTimeout(
+    taskId: string,
+    questionId: string,
+    message: Message
+  ): void {
+    const key = `question:${taskId}:${questionId}`;
+
+    const timer = setTimeout(async () => {
+      this.timeoutTimers.delete(key);
+      try {
+        const timeoutEmbed = new EmbedBuilder()
+          .setColor(Colors.DarkRed)
+          .setTitle(`[Question Timeout] Task ${taskId}`)
+          .setDescription("回答がタイムアウトしました（5分経過）")
+          .setTimestamp();
+
+        await message.edit({
+          embeds: [timeoutEmbed],
+          components: [],
+        });
+      } catch (err) {
+        console.error(`[ButtonHandler] Failed to update timed-out question message:`, err);
+      }
+    }, QUESTION_TIMEOUT_MS);
+
+    this.timeoutTimers.set(key, timer);
+  }
+
+  /** 権限確認のタイムアウトタイマーを開始する */
+  private startPermissionTimeout(
+    taskId: string,
+    permissionId: string,
+    message: Message
+  ): void {
+    const key = `permission:${taskId}:${permissionId}`;
+
+    const timer = setTimeout(async () => {
+      this.timeoutTimers.delete(key);
+      try {
+        // タイムアウト時は自動的に拒否として扱う
+        const task = this.taskManager.getTask(taskId);
+        if (task?.workerId) {
+          const permMsg = createMessage<TaskPermissionResponsePayload>(
+            "task:permission_response",
+            { permissionId, granted: false },
+            { taskId, workerId: task.workerId }
+          );
+          this.workerRegistry.sendToWorker(task.workerId, permMsg);
+        }
+
+        const timeoutEmbed = new EmbedBuilder()
+          .setColor(Colors.DarkRed)
+          .setTitle(`[Permission Timeout] Task ${taskId}`)
+          .setDescription("権限確認がタイムアウトしました（3分経過）- 自動拒否")
+          .setTimestamp();
+
+        await message.edit({
+          embeds: [timeoutEmbed],
+          components: [],
+        });
+      } catch (err) {
+        console.error(`[ButtonHandler] Failed to update timed-out permission message:`, err);
+      }
+    }, PERMISSION_TIMEOUT_MS);
+
+    this.timeoutTimers.set(key, timer);
+  }
+
+  /** タイムアウトタイマーをクリアする */
+  private clearTimeout(key: string): void {
+    const timer = this.timeoutTimers.get(key);
+    if (timer) {
+      globalThis.clearTimeout(timer);
+      this.timeoutTimers.delete(key);
+    }
+  }
+
   // --- Private handlers ---
 
   /**
@@ -179,6 +289,9 @@ export class ButtonHandler {
     const taskId = parts[1];
     const questionId = parts[2];
     const optionIndex = parseInt(parts[3], 10);
+
+    // タイムアウトタイマーをクリア
+    this.clearTimeout(`question:${taskId}:${questionId}`);
 
     const task = this.taskManager.getTask(taskId);
     if (!task || !task.workerId) {
@@ -246,6 +359,9 @@ export class ButtonHandler {
     const taskId = parts[1];
     const questionId = parts[2];
 
+    // タイムアウトタイマーをクリア
+    this.clearTimeout(`question:${taskId}:${questionId}`);
+
     const task = this.taskManager.getTask(taskId);
     if (!task || !task.workerId) {
       await interaction.reply({
@@ -282,6 +398,9 @@ export class ButtonHandler {
     const taskId = parts[1];
     const permissionId = parts[2];
     const action = parts[3]; // "grant" or "deny"
+
+    // タイムアウトタイマーをクリア
+    this.clearTimeout(`permission:${taskId}:${permissionId}`);
 
     const task = this.taskManager.getTask(taskId);
     if (!task || !task.workerId) {
