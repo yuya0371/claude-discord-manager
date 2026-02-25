@@ -23,9 +23,11 @@ import {
   PermissionMode,
   TASK_DEFAULT_TIMEOUT_MS,
 } from "@claude-discord/common";
+import type { TeamUpdatePayload, TeamInfo } from "@claude-discord/common";
 import { WsClient } from "./ws/client.js";
 import { ClaudeExecutor, type ExecuteOptions } from "./claude/executor.js";
 import type { ParsedEvent } from "./claude/parser.js";
+import { TeamWatcher } from "./team/watcher.js";
 
 // ─── .env 読み込み ───
 // npm workspaces 経由で起動した場合 cwd はモノレポルート
@@ -65,6 +67,7 @@ const ALLOWED_DIRS = process.env.ALLOWED_DIRS
 class WorkerApp {
   private readonly wsClient: WsClient;
   private readonly executor = new ClaudeExecutor();
+  private readonly teamWatcher: TeamWatcher;
   private currentTaskId: string | null = null;
   private taskStartTime = 0;
   private taskTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -87,8 +90,11 @@ class WorkerApp {
       allowedDirs: ALLOWED_DIRS,
     });
 
+    this.teamWatcher = new TeamWatcher(WORKER_NAME);
+
     this.setupWsHandlers();
     this.setupExecutorHandlers();
+    this.setupTeamWatcher();
   }
 
   /** Worker を起動する */
@@ -97,6 +103,7 @@ class WorkerApp {
     console.log(`[Worker] Coordinator: ${COORDINATOR_URL}`);
     console.log(`[Worker] Default CWD: ${DEFAULT_CWD}`);
     this.wsClient.connect();
+    this.teamWatcher.start();
   }
 
   /** Worker をシャットダウンする */
@@ -104,6 +111,7 @@ class WorkerApp {
     console.log("[Worker] Shutting down...");
 
     this.clearTaskTimeout();
+    this.teamWatcher.stop();
 
     // 実行中タスクがあればキャンセル
     if (this.executor.running) {
@@ -434,6 +442,18 @@ class WorkerApp {
 
     this.currentTaskId = null;
     this.wsClient.setStatus(WorkerStatus.Online, null);
+  }
+
+  // ─── TeamWatcher イベントハンドラ ───
+
+  private setupTeamWatcher(): void {
+    this.teamWatcher.on("update", (teamInfo: TeamInfo) => {
+      if (!this.wsClient.connected) return;
+
+      const payload: TeamUpdatePayload = { teamInfo };
+      this.wsClient.send("team:update", payload);
+      console.log(`[Worker] Sent team:update for team "${teamInfo.teamName}"`);
+    });
   }
 
   /** タスク用一時ファイルを削除する */

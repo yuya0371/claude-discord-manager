@@ -10,6 +10,7 @@ import {
   TaskQuestionPayload,
   TaskPermissionPayload,
   FileTransferAckPayload,
+  TeamUpdatePayload,
   parseMessage,
 } from "@claude-discord/common";
 import { WorkerRegistry } from "../worker/registry.js";
@@ -26,6 +27,11 @@ export interface WsServerConfig {
  */
 export class WsServer {
   private wss: WebSocketServer | null = null;
+
+  /** team:update 受信時のコールバック */
+  public onTeamUpdate:
+    | ((workerId: string, payload: TeamUpdatePayload) => Promise<void>)
+    | null = null;
 
   constructor(
     private readonly config: WsServerConfig,
@@ -206,6 +212,15 @@ export class WsServer {
           this.taskManager.handleFileTransferAck(
             msg.taskId,
             msg.payload as FileTransferAckPayload
+          );
+        }
+        break;
+
+      case "team:update":
+        if (this.onTeamUpdate) {
+          await this.onTeamUpdate(
+            workerId,
+            msg.payload as TeamUpdatePayload
           );
         }
         break;

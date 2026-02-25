@@ -377,6 +377,10 @@ export function buildHelpEmbed(): EmbedBuilder {
         ].join("\n"),
       },
       {
+        name: "/teams",
+        value: "アクティブなAgent Teamsの一覧を表示します。",
+      },
+      {
         name: "/help",
         value: "このヘルプメッセージを表示します。",
       },

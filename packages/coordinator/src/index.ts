@@ -73,6 +73,7 @@ class CoordinatorApp {
       statusChannelId: env.channelStatus,
       workersChannelId: env.channelWorkers,
       tokenUsageChannelId: env.channelTokenUsage,
+      teamsChannelId: env.channelTeams,
     };
     this.discordBot = new DiscordBot(
       botConfig,
@@ -81,6 +82,13 @@ class CoordinatorApp {
       aliasManager
     );
     await this.discordBot.start();
+
+    // team:update メッセージのルーティングを設定
+    this.wsServer.onTeamUpdate = async (workerId, payload) => {
+      if (this.discordBot) {
+        await this.discordBot.handleTeamUpdate(workerId, payload);
+      }
+    };
 
     console.log("Coordinator Bot started successfully");
   }
@@ -130,6 +138,9 @@ class CoordinatorApp {
     // オプショナル: #token-usage チャンネル
     const channelTokenUsage = process.env.CHANNEL_TOKEN_USAGE ?? undefined;
 
+    // オプショナル: #teams チャンネル
+    const channelTeams = process.env.CHANNEL_TEAMS ?? undefined;
+
     return {
       discordToken,
       guildId,
@@ -139,6 +150,7 @@ class CoordinatorApp {
       wsPort,
       coordinatorSecret,
       channelTokenUsage,
+      channelTeams,
     };
   }
 }
@@ -152,6 +164,7 @@ interface EnvConfig {
   wsPort: number;
   coordinatorSecret: string;
   channelTokenUsage?: string;
+  channelTeams?: string;
 }
 
 // --- Application entry point ---
