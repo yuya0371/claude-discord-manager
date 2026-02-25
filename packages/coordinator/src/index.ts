@@ -189,3 +189,23 @@ const shutdown = async (signal: string) => {
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+// ─── グローバルエラーハンドリング ───
+
+process.on("uncaughtException", (error) => {
+  console.error(
+    `${new Date().toISOString()} [ERROR] [Coordinator] Uncaught exception:`,
+    error
+  );
+  // プロセスは不安定な状態の可能性があるため、graceful shutdown を試行
+  void shutdown("uncaughtException");
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    `${new Date().toISOString()} [ERROR] [Coordinator] Unhandled rejection:`,
+    reason
+  );
+  // unhandledRejection はプロセスを即座に終了させない
+  // ログを残して継続する
+});

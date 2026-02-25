@@ -15,6 +15,7 @@ import { TaskManager, TaskCreateOptions } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
 import { ProjectAliasManager } from "../project/aliases.js";
 import { TokenTracker } from "../token/tracker.js";
+import { NotificationSettings } from "../notification/settings.js";
 import {
   buildTaskEmbed,
   buildWorkersEmbed,
@@ -40,7 +41,8 @@ export class CommandHandler {
     private readonly allowedUserIds: string[],
     private readonly statusChannelId: string,
     private readonly aliasManager?: ProjectAliasManager,
-    private readonly tokenTracker?: TokenTracker
+    private readonly tokenTracker?: TokenTracker,
+    private readonly notificationSettings?: NotificationSettings
   ) {
     this.commands = this.buildCommands();
   }
@@ -104,6 +106,9 @@ export class CommandHandler {
         break;
       case "teams":
         await this.handleTeams(interaction);
+        break;
+      case "notify":
+        await this.handleNotify(interaction);
         break;
       default:
         await interaction.reply({
@@ -246,7 +251,22 @@ export class CommandHandler {
       .setName("teams")
       .setDescription("アクティブなAgent Teamsの一覧を表示する");
 
-    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd, aliasCmd, tokenCmd, teamsCmd];
+    const notifyCmd = new SlashCommandBuilder()
+      .setName("notify")
+      .setDescription("通知レベルを設定する")
+      .addStringOption((option) =>
+        option
+          .setName("level")
+          .setDescription("通知レベル")
+          .setRequired(true)
+          .addChoices(
+            { name: "all - 全イベントで@メンション", value: "all" },
+            { name: "important - エラー・質問のみ@メンション", value: "important" },
+            { name: "none - @メンションなし", value: "none" }
+          )
+      ) as SlashCommandBuilder;
+
+    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd, aliasCmd, tokenCmd, teamsCmd, notifyCmd];
   }
 
   // --- Command handlers ---
@@ -307,12 +327,26 @@ export class CommandHandler {
       });
     }
 
+    // セッション継続: sessionId を自動解決
+    let sessionId: string | null = null;
+    if (continueSession) {
+      sessionId = this.taskManager.getLatestSessionId(resolvedWorker, resolvedCwd);
+      if (!sessionId) {
+        await interaction.reply({
+          content: "No previous session found to continue. Run a task first, then use `continue: True`.",
+          ephemeral: true,
+        });
+        return;
+      }
+    }
+
     // エフェメラルで即座に応答
     const attachNote = attachments.length > 0
       ? ` (with ${attachments.length} file)`
       : "";
+    const continueNote = sessionId ? " (continuing session)" : "";
     await interaction.reply({
-      content: `Task accepted${attachNote}: "${prompt.substring(0, 100)}${prompt.length > 100 ? "..." : ""}"`,
+      content: `Task accepted${attachNote}${continueNote}: "${prompt.substring(0, 100)}${prompt.length > 100 ? "..." : ""}"`,
       ephemeral: true,
     });
 
@@ -324,6 +358,7 @@ export class CommandHandler {
       permissionMode,
       teamMode,
       continueSession,
+      sessionId,
       attachments,
     };
 
@@ -408,7 +443,18 @@ export class CommandHandler {
       if (recentCompleted.length > 0) {
         lines.push("**Recent:**");
         for (const t of recentCompleted) {
-          lines.push(`- ${t.id} [${t.status}]: ${t.prompt.substring(0, 50)}...`);
+          const sessionTag = t.sessionId ? ` [session]` : "";
+          lines.push(`- ${t.id} [${t.status}]: ${t.prompt.substring(0, 50)}...${sessionTag}`);
+        }
+      }
+
+      // セッション継続可能なタスク
+      const sessions = this.taskManager.getRecentSessions(5);
+      if (sessions.length > 0) {
+        lines.push("\n**Sessions (continuable):**");
+        for (const s of sessions) {
+          const promptShort = s.prompt.substring(0, 40) + (s.prompt.length > 40 ? "..." : "");
+          lines.push(`- ${s.taskId}: ${promptShort} (${s.workerId ?? "any"})`);
         }
       }
 
@@ -595,5 +641,35 @@ export class CommandHandler {
         break;
       }
     }
+  }
+
+  private async handleNotify(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
+    if (!this.notificationSettings) {
+      await interaction.reply({
+        content: "Notification settings are not enabled.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const level = interaction.options.getString("level", true);
+    const userId = interaction.user.id;
+
+    // NotifyLevel enum にキャスト
+    const notifyLevel = level as import("@claude-discord/common").NotifyLevel;
+    this.notificationSettings.setLevel(userId, notifyLevel);
+
+    const descriptions: Record<string, string> = {
+      all: "All events will mention you.",
+      important: "Only errors and questions will mention you.",
+      none: "You will not be mentioned.",
+    };
+
+    await interaction.reply({
+      content: `Notification level set to **${level}**. ${descriptions[level] ?? ""}`,
+      ephemeral: true,
+    });
   }
 }

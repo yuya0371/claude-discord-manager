@@ -461,6 +461,51 @@ export class TaskManager {
   }
 
   /**
+   * 直近の完了タスクからセッションIDを取得する
+   * continueSession=true かつ sessionId 未指定時に使用する
+   */
+  getLatestSessionId(workerId?: string | null, cwd?: string | null): string | null {
+    const completedTasks = this.getAllTasks()
+      .filter((t) => t.status === TaskStatus.Completed && t.sessionId)
+      .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
+
+    for (const task of completedTasks) {
+      // Worker指定がある場合はそのWorkerのセッションのみ
+      if (workerId && task.workerId !== workerId) continue;
+      // CWD指定がある場合はそのCWDのセッションのみ
+      if (cwd && task.cwd !== cwd) continue;
+      return task.sessionId;
+    }
+
+    return null;
+  }
+
+  /**
+   * 直近のセッション一覧を取得する（最新N件）
+   */
+  getRecentSessions(limit: number = 10): Array<{
+    taskId: string;
+    sessionId: string;
+    workerId: string | null;
+    cwd: string | null;
+    prompt: string;
+    completedAt: number;
+  }> {
+    return this.getAllTasks()
+      .filter((t) => t.status === TaskStatus.Completed && t.sessionId)
+      .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
+      .slice(0, limit)
+      .map((t) => ({
+        taskId: t.id,
+        sessionId: t.sessionId!,
+        workerId: t.workerId,
+        cwd: t.cwd,
+        prompt: t.prompt,
+        completedAt: t.completedAt ?? 0,
+      }));
+  }
+
+  /**
    * Worker からの質問を処理
    */
   async handleTaskQuestion(

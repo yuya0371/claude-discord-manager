@@ -405,15 +405,42 @@ class WorkerApp {
       this.wsClient.send("task:complete", payload, taskId);
       console.log(`[Worker] Task ${taskId} completed in ${durationMs}ms`);
     } else {
-      // 異常終了
+      // 異常終了 - エラーコードの詳細な判別
+      const codeDescription = code !== null
+        ? ClaudeExecutor.getExitCodeDescription(code)
+        : null;
+
+      let errorMessage: string;
+      if (this.stderrBuffer.trim()) {
+        errorMessage = this.stderrBuffer.trim();
+      } else if (codeDescription) {
+        errorMessage = `Claude CLI crashed: ${codeDescription} (exit code ${code})`;
+      } else if (signal) {
+        errorMessage = `Claude CLI terminated by signal ${signal}`;
+      } else {
+        errorMessage = `Claude CLI exited unexpectedly (code=${code}, signal=${signal})`;
+      }
+
+      // OOM / SIGKILL の特別なエラーコード
+      let errorCode: string;
+      if (code === 137 || signal === "SIGKILL") {
+        errorCode = "OOM_OR_KILLED";
+      } else if (code === 139 || signal === "SIGSEGV") {
+        errorCode = "SEGFAULT";
+      } else if (code === 127) {
+        errorCode = "CLI_NOT_FOUND";
+      } else {
+        errorCode = `EXIT_${code ?? signal ?? "UNKNOWN"}`;
+      }
+
       const payload: TaskErrorPayload = {
-        message: this.stderrBuffer.trim() || `Process exited with code ${code}, signal ${signal}`,
-        code: `EXIT_${code ?? signal ?? "UNKNOWN"}`,
+        message: errorMessage,
+        code: errorCode,
         partialResult: this.lastResultText || null,
         tokenUsage: { ...this.accumulatedTokens },
       };
       this.wsClient.send("task:error", payload, taskId);
-      console.error(`[Worker] Task ${taskId} failed: code=${code}, signal=${signal}`);
+      console.error(`[Worker] Task ${taskId} failed: code=${code}, signal=${signal}, errorCode=${errorCode}`);
     }
 
     // 一時ファイルのクリーンアップ
@@ -484,3 +511,20 @@ const handleShutdown = async (signal: string) => {
 
 process.on("SIGINT", () => void handleShutdown("SIGINT"));
 process.on("SIGTERM", () => void handleShutdown("SIGTERM"));
+
+// ─── グローバルエラーハンドリング ───
+
+process.on("uncaughtException", (error) => {
+  console.error(
+    `${new Date().toISOString()} [ERROR] [Worker] Uncaught exception:`,
+    error
+  );
+  void handleShutdown("uncaughtException");
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    `${new Date().toISOString()} [ERROR] [Worker] Unhandled rejection:`,
+    reason
+  );
+});

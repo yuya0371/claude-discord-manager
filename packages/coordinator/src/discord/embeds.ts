@@ -139,6 +139,15 @@ export function buildTaskEmbed(task: Task): EmbedBuilder {
     });
   }
 
+  // セッションID（継続可能な場合のみ表示）
+  if (task.sessionId && task.status === TaskStatus.Completed) {
+    embed.addFields({
+      name: "Session",
+      value: `\`${task.sessionId.substring(0, 16)}...\` (use \`continue: True\` to resume)`,
+      inline: true,
+    });
+  }
+
   embed.setTimestamp(task.createdAt);
   embed.setFooter({ text: `Requested by ${task.requestedBy}` });
 
@@ -379,6 +388,16 @@ export function buildHelpEmbed(): EmbedBuilder {
       {
         name: "/teams",
         value: "アクティブなAgent Teamsの一覧を表示します。",
+      },
+      {
+        name: "/notify",
+        value: [
+          "通知レベルを設定します。",
+          "`level` (必須): all / important / none",
+          "**all**: 全イベントで@メンション",
+          "**important** (default): エラー・質問のみ@メンション",
+          "**none**: @メンションなし",
+        ].join("\n"),
       },
       {
         name: "/help",

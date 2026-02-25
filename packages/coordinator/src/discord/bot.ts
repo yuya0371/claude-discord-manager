@@ -1,10 +1,12 @@
 import {
   Client,
+  DiscordAPIError,
   GatewayIntentBits,
   ChatInputCommandInteraction,
   TextChannel,
   Events,
   Message,
+  RESTJSONErrorCodes,
 } from "discord.js";
 import {
   Task,
@@ -30,9 +32,69 @@ import { TaskManager } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
 import { ProjectAliasManager } from "../project/aliases.js";
 import { TokenTracker } from "../token/tracker.js";
+import {
+  NotificationSettings,
+  NotificationEventType,
+} from "../notification/settings.js";
 
 /** ステータスサマリーの更新間隔（30秒） */
 const STATUS_SUMMARY_UPDATE_INTERVAL_MS = 30_000;
+
+/** Discord APIリトライの最大回数 */
+const MAX_RETRY_ATTEMPTS = 3;
+
+/**
+ * Discord API 呼び出しをレート制限対応のリトライ付きで実行する。
+ * 429 (Rate Limited) の場合は retry_after を待って再試行する。
+ */
+async function withDiscordRetry<T>(
+  fn: () => Promise<T>,
+  label: string,
+  maxAttempts = MAX_RETRY_ATTEMPTS
+): Promise<T> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (error instanceof DiscordAPIError) {
+        // レート制限: retry_after ms 待って再試行
+        if (error.status === 429) {
+          const retryAfter = (error as DiscordAPIError & { retryAfter?: number }).retryAfter ?? 1000;
+          const waitMs = typeof retryAfter === "number" ? retryAfter : 1000;
+          console.warn(
+            `[DiscordBot] Rate limited on ${label}, retrying in ${waitMs}ms (attempt ${attempt}/${maxAttempts})`
+          );
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+          continue;
+        }
+
+        // Unknown Message / Unknown Channel は再試行しても無駄
+        if (
+          error.code === RESTJSONErrorCodes.UnknownMessage ||
+          error.code === RESTJSONErrorCodes.UnknownChannel
+        ) {
+          throw error;
+        }
+      }
+
+      // 最後の試行なら投げる
+      if (attempt >= maxAttempts) {
+        throw error;
+      }
+
+      // 指数バックオフで再試行
+      const backoffMs = 1000 * Math.pow(2, attempt - 1);
+      console.warn(
+        `[DiscordBot] Error on ${label}, retrying in ${backoffMs}ms (attempt ${attempt}/${maxAttempts}):`,
+        error instanceof Error ? error.message : error
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
+
+  // ここに到達しないはずだが TypeScript のため
+  throw new Error(`withDiscordRetry: max attempts exhausted for ${label}`);
+}
 
 export interface DiscordBotConfig {
   token: string;
@@ -59,6 +121,9 @@ export class DiscordBot {
   /** トークン使用量トラッカー */
   private tokenTracker: TokenTracker;
 
+  /** 通知設定 */
+  private notificationSettings: NotificationSettings;
+
   /** アクティブなチーム情報のキャッシュ */
   private activeTeams: Map<string, TeamInfo> = new Map();
 
@@ -78,6 +143,7 @@ export class DiscordBot {
     this.tokenUsageChannelId = config.tokenUsageChannelId ?? null;
     this.teamsChannelId = config.teamsChannelId ?? null;
     this.tokenTracker = new TokenTracker();
+    this.notificationSettings = new NotificationSettings();
 
     this.client = new Client({
       intents: [
@@ -98,7 +164,8 @@ export class DiscordBot {
       this.config.allowedUserIds,
       this.statusChannelId,
       this.aliasManager,
-      this.tokenTracker
+      this.tokenTracker,
+      this.notificationSettings
     );
 
     // /teams コマンド用のチーム情報プロバイダを設定
@@ -218,6 +285,9 @@ export class DiscordBot {
         await this.updateTaskEmbed(task);
         await this.updateStatusSummary();
 
+        // メンション通知
+        await this.postMentionNotification(task, "completed");
+
         // トークン使用量を記録・通知
         if (task.workerId) {
           this.tokenTracker.record(task.id, task.workerId, task.tokenUsage);
@@ -227,6 +297,9 @@ export class DiscordBot {
       onTaskFailed: async (task) => {
         await this.updateTaskEmbed(task);
         await this.updateStatusSummary();
+
+        // メンション通知
+        await this.postMentionNotification(task, "error");
 
         // トークン使用量を記録（失敗時も記録する）
         if (task.workerId && (task.tokenUsage.inputTokens > 0 || task.tokenUsage.outputTokens > 0)) {
@@ -241,6 +314,14 @@ export class DiscordBot {
       onTaskQuestion: async (taskId, payload) => {
         const channel = this.client.channels.cache.get(this.statusChannelId);
         if (channel && channel.isTextBased() && "send" in channel) {
+          // メンションテキストを生成して質問メッセージの前に投稿
+          const mentionText = this.notificationSettings.buildMentionText(
+            this.config.allowedUserIds,
+            "question"
+          );
+          if (mentionText) {
+            await (channel as TextChannel).send(mentionText);
+          }
           await this.buttonHandler!.postQuestionMessage(
             channel as TextChannel,
             taskId,
@@ -251,6 +332,14 @@ export class DiscordBot {
       onTaskPermission: async (taskId, payload) => {
         const channel = this.client.channels.cache.get(this.statusChannelId);
         if (channel && channel.isTextBased() && "send" in channel) {
+          // メンションテキストを生成して権限確認メッセージの前に投稿
+          const mentionText = this.notificationSettings.buildMentionText(
+            this.config.allowedUserIds,
+            "permission"
+          );
+          if (mentionText) {
+            await (channel as TextChannel).send(mentionText);
+          }
           await this.buttonHandler!.postPermissionMessage(
             channel as TextChannel,
             taskId,
@@ -278,7 +367,10 @@ export class DiscordBot {
       if (!message) return;
 
       const embed = buildTaskEmbed(task);
-      await message.edit({ embeds: [embed] });
+      await withDiscordRetry(
+        () => message.edit({ embeds: [embed] }),
+        `updateTaskEmbed(${task.id})`
+      );
     } catch (error) {
       console.error(`Failed to update task embed for ${task.id}:`, error);
     }
@@ -426,7 +518,10 @@ export class DiscordBot {
         this.taskManager.getRunningTasks(),
         this.taskManager.getQueuedTasks()
       );
-      await message.edit({ embeds: [embed] });
+      await withDiscordRetry(
+        () => message.edit({ embeds: [embed] }),
+        "updateStatusSummary"
+      );
     } catch (error) {
       console.error("Failed to update status summary:", error);
     }
@@ -454,7 +549,10 @@ export class DiscordBot {
       if (!channel || !channel.isTextBased()) return;
 
       const embed = buildWorkerConnectedEmbed(worker);
-      await (channel as TextChannel).send({ embeds: [embed] });
+      await withDiscordRetry(
+        () => (channel as TextChannel).send({ embeds: [embed] }),
+        "postWorkerConnected"
+      );
     } catch (error) {
       console.error("Failed to post worker connected notification:", error);
     }
@@ -506,6 +604,39 @@ export class DiscordBot {
    */
   getTokenTracker(): TokenTracker {
     return this.tokenTracker;
+  }
+
+  /**
+   * NotificationSettingsインスタンスを取得する
+   */
+  getNotificationSettings(): NotificationSettings {
+    return this.notificationSettings;
+  }
+
+  /**
+   * タスク完了/失敗時にメンション通知を#statusチャンネルに投稿する
+   */
+  private async postMentionNotification(
+    task: Task,
+    eventType: NotificationEventType
+  ): Promise<void> {
+    const mentionText = this.notificationSettings.buildMentionText(
+      this.config.allowedUserIds,
+      eventType
+    );
+    if (!mentionText) return;
+
+    try {
+      const channel = this.client.channels.cache.get(this.statusChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const label = eventType === "completed" ? "completed" : "failed";
+      await (channel as TextChannel).send(
+        `${mentionText} Task **${task.id}** ${label}.`
+      );
+    } catch (error) {
+      console.error("Failed to post mention notification:", error);
+    }
   }
 
   // ─── Team 通知 ───

@@ -21,6 +21,19 @@ export interface ExecutorEvents {
   stderr: (data: string) => void;
 }
 
+/** 既知の異常終了コードとその意味 */
+const EXIT_CODE_DESCRIPTIONS: Record<number, string> = {
+  1: "General error",
+  2: "Misuse of shell command / invalid arguments",
+  126: "Command not executable",
+  127: "Command not found (claude CLI not installed?)",
+  128: "Invalid exit argument",
+  130: "Terminated by Ctrl+C (SIGINT)",
+  137: "Killed (SIGKILL / OOM)",
+  139: "Segmentation fault (SIGSEGV)",
+  143: "Terminated (SIGTERM)",
+};
+
 /**
  * Claude CLI の子プロセスを管理する。
  * child_process.spawn で CLI を実行し、stdout を StreamJsonParser でパースする。
@@ -47,11 +60,19 @@ export class ClaudeExecutor extends EventEmitter {
     console.log(`[Executor] Spawning: claude ${args.join(" ")}`);
     console.log(`[Executor] CWD: ${options.cwd}`);
 
-    this.process = spawn("claude", args, {
-      cwd: options.cwd,
-      env: { ...process.env },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    try {
+      this.process = spawn("claude", args, {
+        cwd: options.cwd,
+        env: { ...process.env },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (err) {
+      this._running = false;
+      const error = err instanceof Error ? err : new Error(String(err));
+      console.error(`[Executor] Failed to spawn process:`, error.message);
+      this.emit("error", error);
+      return;
+    }
 
     // stdout: stream-json 出力を行単位で読み取り
     this.process.stdout?.on("data", (chunk: Buffer) => {
@@ -69,7 +90,17 @@ export class ClaudeExecutor extends EventEmitter {
     this.process.on("exit", (code, signal) => {
       this._running = false;
       this.process = null;
-      console.log(`[Executor] Process exited: code=${code}, signal=${signal}`);
+
+      // 異常終了コードの詳細ログ
+      if (code !== null && code !== 0) {
+        const description = EXIT_CODE_DESCRIPTIONS[code] ?? "Unknown error";
+        console.error(`[Executor] Process crashed: code=${code} (${description}), signal=${signal}`);
+      } else if (signal) {
+        console.warn(`[Executor] Process killed by signal: ${signal}`);
+      } else {
+        console.log(`[Executor] Process exited normally: code=${code}`);
+      }
+
       this.emit("exit", code, signal);
     });
 
@@ -100,6 +131,11 @@ export class ClaudeExecutor extends EventEmitter {
         resolve();
       });
     });
+  }
+
+  /** 終了コードの説明を取得する */
+  static getExitCodeDescription(code: number): string {
+    return EXIT_CODE_DESCRIPTIONS[code] ?? "Unknown error";
   }
 
   /** stdin に入力を書き込む(質問応答・権限応答用) */
