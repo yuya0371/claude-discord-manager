@@ -386,6 +386,22 @@ export function buildHelpEmbed(): EmbedBuilder {
         ].join("\n"),
       },
       {
+        name: "/alias",
+        value: [
+          "プロジェクトエイリアスを管理します。",
+          "`/alias add name:<名前> path:<パス> [worker:<Worker名>]`",
+          "`/alias remove name:<名前>`",
+          "`/alias list`",
+        ].join("\n"),
+      },
+      {
+        name: "/token",
+        value: [
+          "トークン使用量を表示します。",
+          "`view`: summary (既定) / detail / worker",
+        ].join("\n"),
+      },
+      {
         name: "/teams",
         value: "アクティブなAgent Teamsの一覧を表示します。",
       },
