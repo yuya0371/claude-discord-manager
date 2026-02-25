@@ -485,12 +485,13 @@ export class ButtonHandler {
       return;
     }
 
-    // セッション継続で新しいタスクを作成
+    // セッション継続で新しいタスクを作成（元のワーカーを指定）
     const newTask = this.taskManager.createTask({
       prompt: replyText,
       cwd: originalTask.cwd,
       permissionMode: originalTask.permissionMode,
       requestedBy: interaction.user.id,
+      workerId: originalTask.workerId,
       sessionId,
       continueSession: true,
     });
