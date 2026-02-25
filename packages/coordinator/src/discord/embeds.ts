@@ -30,23 +30,23 @@ export function buildTaskEmbed(task: Task): EmbedBuilder {
   switch (task.status) {
     case TaskStatus.Queued:
       embed.setColor(Colors.Yellow);
-      embed.setTitle(`[Queued] Task ${task.id}`);
+      embed.setTitle(`\u23F3 [Queued] Task ${task.id}`);
       break;
     case TaskStatus.Running:
       embed.setColor(Colors.Blue);
-      embed.setTitle(`[Running] Task ${task.id}`);
+      embed.setTitle(`\uD83D\uDD04 [Running] Task ${task.id}`);
       break;
     case TaskStatus.Completed:
       embed.setColor(Colors.Green);
-      embed.setTitle(`[Completed] Task ${task.id}`);
+      embed.setTitle(`\u2705 [Completed] Task ${task.id}`);
       break;
     case TaskStatus.Failed:
       embed.setColor(Colors.Red);
-      embed.setTitle(`[Failed] Task ${task.id}`);
+      embed.setTitle(`\u274C [Failed] Task ${task.id}`);
       break;
     case TaskStatus.Cancelled:
       embed.setColor(Colors.Grey);
-      embed.setTitle(`[Cancelled] Task ${task.id}`);
+      embed.setTitle(`\uD83D\uDEAB [Cancelled] Task ${task.id}`);
       break;
   }
 
@@ -76,21 +76,22 @@ export function buildTaskEmbed(task: Task): EmbedBuilder {
   // ツール履歴（最新10件）
   if (task.toolHistory.length > 0) {
     const recentTools = task.toolHistory.slice(-10);
-    const toolLines = recentTools.map((t) => {
+    const toolLines = recentTools.map((t, i) => {
       const statusIcon =
         t.status === "running"
-          ? "..."
+          ? "\uD83D\uDD04"
           : t.status === "completed"
-            ? "ok"
-            : "err";
-      return `[${statusIcon}] ${t.summary}`;
+            ? "\u2705"
+            : "\u274C";
+      const connector = i < recentTools.length - 1 ? "\u251C\u2500\u2500" : "\u2514\u2500\u2500";
+      return `${connector} ${statusIcon} ${t.summary}`;
     });
     const toolText = toolLines.join("\n");
     const truncated =
       toolText.length > 1024
         ? toolText.substring(0, 1021) + "..."
         : toolText;
-    embed.addFields({ name: "Tools", value: "```\n" + truncated + "\n```" });
+    embed.addFields({ name: "Tools", value: truncated });
   }
 
   // 結果テキスト（ステータスがcompleted/failedの場合）
@@ -114,7 +115,10 @@ export function buildTaskEmbed(task: Task): EmbedBuilder {
   }
 
   if (task.status === TaskStatus.Failed && task.errorMessage) {
-    embed.addFields({ name: "Error", value: task.errorMessage });
+    embed.addFields({
+      name: "Error",
+      value: "```\n" + truncateText(task.errorMessage, 1018) + "\n```",
+    });
   }
 
   // トークン使用量
@@ -123,9 +127,9 @@ export function buildTaskEmbed(task: Task): EmbedBuilder {
     task.tokenUsage.outputTokens > 0
   ) {
     const tokenText =
-      `In: ${task.tokenUsage.inputTokens.toLocaleString()} | ` +
+      `\uD83D\uDCAC In: ${task.tokenUsage.inputTokens.toLocaleString()} | ` +
       `Out: ${task.tokenUsage.outputTokens.toLocaleString()}`;
-    embed.addFields({ name: "Tokens", value: tokenText, inline: true });
+    embed.addFields({ name: "\uD83D\uDCAC Tokens", value: tokenText, inline: true });
   }
 
   // 時間情報
@@ -133,7 +137,7 @@ export function buildTaskEmbed(task: Task): EmbedBuilder {
     const durationMs = task.completedAt - task.startedAt;
     const durationSec = Math.round(durationMs / 1000);
     embed.addFields({
-      name: "Duration",
+      name: "\u23F1\uFE0F Duration",
       value: `${durationSec}s`,
       inline: true,
     });
@@ -170,19 +174,20 @@ export function buildWorkersEmbed(workers: WorkerInfo[]): EmbedBuilder {
 
   const now = Date.now();
   for (const w of workers) {
-    const statusIcon =
+    const statusLabel =
       w.status === WorkerStatus.Online
-        ? "ONLINE"
+        ? "\u{1F7E2} Online"
         : w.status === WorkerStatus.Busy
-          ? "BUSY"
-          : "OFFLINE";
+          ? "\u{1F7E1} Busy"
+          : "\u26AB Offline";
 
     const connectedAgo = formatDuration(now - w.connectedAt);
     const heartbeatAgo = formatDuration(now - w.lastHeartbeat);
-    const heartbeatStatus = (now - w.lastHeartbeat) > 60_000 ? " (stale)" : "";
+    const heartbeatStale = (now - w.lastHeartbeat) > 60_000;
+    const heartbeatStatus = heartbeatStale ? " \u26A0\uFE0F stale" : "";
 
     const infoLines: string[] = [
-      `Status: **${statusIcon}**`,
+      `Status: **${statusLabel}**`,
       `OS: ${w.os} | Node: ${w.nodeVersion} | CLI: ${w.claudeCliVersion}`,
       `Connected: ${connectedAgo} ago | Heartbeat: ${heartbeatAgo} ago${heartbeatStatus}`,
     ];
@@ -195,8 +200,15 @@ export function buildWorkersEmbed(workers: WorkerInfo[]): EmbedBuilder {
       infoLines.push(`Dirs: ${w.allowedDirs.join(", ")}`);
     }
 
+    const fieldIcon =
+      w.status === WorkerStatus.Online
+        ? "\u{1F7E2}"
+        : w.status === WorkerStatus.Busy
+          ? "\u{1F7E1}"
+          : "\u26AB";
+
     embed.addFields({
-      name: `[${statusIcon}] ${w.name}`,
+      name: `${fieldIcon} ${w.name}`,
       value: infoLines.join("\n"),
     });
   }
@@ -260,16 +272,16 @@ export function buildStatusSummaryEmbed(
     for (const w of workers) {
       const icon =
         w.status === WorkerStatus.Online
-          ? "[ OK ]"
+          ? "\u{1F7E2}"
           : w.status === WorkerStatus.Busy
-            ? "[BUSY]"
-            : "[OFF ]";
+            ? "\u{1F7E1}"
+            : "\u26AB";
       const taskInfo = w.currentTaskId ? ` -> ${w.currentTaskId}` : "";
       workerLines.push(`${icon} ${w.name}${taskInfo}`);
     }
     embed.addFields({
       name: `Workers (${onlineCount} online, ${busyCount} busy)`,
-      value: "```\n" + workerLines.join("\n") + "\n```",
+      value: workerLines.join("\n"),
     });
   }
 
@@ -321,7 +333,7 @@ export function buildStatusSummaryEmbed(
 export function buildWorkerConnectedEmbed(worker: WorkerInfo): EmbedBuilder {
   return new EmbedBuilder()
     .setColor(Colors.Green)
-    .setTitle(`[Connected] ${worker.name}`)
+    .setTitle(`\u2705 Worker Connected: ${worker.name}`)
     .addFields(
       { name: "OS", value: worker.os, inline: true },
       { name: "Node.js", value: worker.nodeVersion, inline: true },
@@ -340,7 +352,7 @@ export function buildWorkerDisconnectedEmbed(
 ): EmbedBuilder {
   return new EmbedBuilder()
     .setColor(Colors.Red)
-    .setTitle(`[Disconnected] ${workerName}`)
+    .setTitle(`\u274C Worker Disconnected: ${workerName}`)
     .addFields({ name: "Reason", value: reason })
     .setTimestamp();
 }
@@ -518,7 +530,7 @@ export function buildTokenSummaryEmbed(
 
   const embed = new EmbedBuilder()
     .setColor(Colors.Gold)
-    .setTitle("Token Usage Summary")
+    .setTitle("\uD83D\uDCB0 Token Usage Summary")
     .setDescription(`Date: **${dateStr}**`)
     .setTimestamp();
 
@@ -527,7 +539,7 @@ export function buildTokenSummaryEmbed(
 
   embed.addFields(
     {
-      name: "Today",
+      name: "\uD83D\uDCCA Today",
       value: [
         `Tasks: **${todaySummary.taskCount}**`,
         `Total: **${formatTokenCount(todayTotal)}** tokens`,
@@ -538,7 +550,7 @@ export function buildTokenSummaryEmbed(
       ].join("\n"),
     },
     {
-      name: "Cumulative",
+      name: "\uD83D\uDCC8 Cumulative",
       value: [
         `Tasks: **${cumulativeSummary.taskCount}**`,
         `Total: **${formatTokenCount(cumulativeSummary.totalInput + cumulativeSummary.totalOutput)}** tokens`,
@@ -559,7 +571,7 @@ export function buildTokenDetailEmbed(
 ): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setColor(Colors.Gold)
-    .setTitle("Token Usage - Task Detail")
+    .setTitle("\uD83D\uDCB0 Token Usage - Task Detail")
     .setTimestamp();
 
   if (records.length === 0) {
@@ -597,7 +609,7 @@ export function buildTokenWorkerEmbed(
 ): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setColor(Colors.Gold)
-    .setTitle("Token Usage - By Worker")
+    .setTitle("\uD83D\uDCB0 Token Usage - By Worker")
     .setTimestamp();
 
   if (workerSummaries.length === 0) {
@@ -635,7 +647,7 @@ export function buildTokenUsageNotificationEmbed(
 
   return new EmbedBuilder()
     .setColor(Colors.Gold)
-    .setTitle(`Token Usage - ${taskId}`)
+    .setTitle(`\uD83D\uDCAC Token Usage - ${taskId}`)
     .setDescription(promptDisplay)
     .addFields(
       {
@@ -676,12 +688,12 @@ export function buildTeamUpdateEmbed(teamInfo: TeamInfo): EmbedBuilder {
   if (teamInfo.members.length > 0) {
     const memberLines = teamInfo.members.map((m) => {
       const statusIcon =
-        m.status === "active" ? "[ACT]" : m.status === "idle" ? "[IDL]" : "[OFF]";
+        m.status === "active" ? "\u{1F7E2}" : m.status === "idle" ? "\u{1F7E1}" : "\u26AB";
       return `${statusIcon} ${m.name} (${m.agentType})`;
     });
     embed.addFields({
       name: `Members (${teamInfo.members.length})`,
-      value: "```\n" + truncateText(memberLines.join("\n"), 1018) + "\n```",
+      value: truncateText(memberLines.join("\n"), 1024),
     });
   }
 
@@ -690,10 +702,10 @@ export function buildTeamUpdateEmbed(teamInfo: TeamInfo): EmbedBuilder {
     const taskLines = teamInfo.tasks.slice(0, 15).map((t) => {
       const statusIcon =
         t.status === "completed"
-          ? "[DONE]"
+          ? "\u2705"
           : t.status === "in_progress"
-            ? "[RUN ]"
-            : "[WAIT]";
+            ? "\uD83D\uDD04"
+            : "\u23F3";
       const owner = t.owner ? ` (${t.owner})` : "";
       return `${statusIcon} ${t.subject}${owner}`;
     });
@@ -702,7 +714,7 @@ export function buildTeamUpdateEmbed(teamInfo: TeamInfo): EmbedBuilder {
     }
     embed.addFields({
       name: `Tasks (${teamInfo.tasks.length})`,
-      value: "```\n" + truncateText(taskLines.join("\n"), 1018) + "\n```",
+      value: truncateText(taskLines.join("\n"), 1024),
     });
   }
 
@@ -747,7 +759,7 @@ export function buildTeamsListEmbed(teams: TeamInfo[]): EmbedBuilder {
     const completedTasks = team.tasks.filter((t) => t.status === "completed").length;
 
     embed.addFields({
-      name: team.teamName,
+      name: `\uD83D\uDC65 ${team.teamName}`,
       value: [
         `Worker: **${team.workerId}**`,
         `Members: ${memberNames || "none"}`,
