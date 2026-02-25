@@ -12,6 +12,7 @@ import {
 } from "@claude-discord/common";
 import { TaskManager, TaskCreateOptions } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
+import { ProjectAliasManager } from "../project/aliases.js";
 import { buildTaskEmbed, buildWorkersEmbed, buildHelpEmbed } from "./embeds.js";
 
 /**
@@ -24,7 +25,8 @@ export class CommandHandler {
     private readonly taskManager: TaskManager,
     private readonly workerRegistry: WorkerRegistry,
     private readonly allowedUserIds: string[],
-    private readonly statusChannelId: string
+    private readonly statusChannelId: string,
+    private readonly aliasManager?: ProjectAliasManager
   ) {
     this.commands = this.buildCommands();
   }
@@ -79,6 +81,9 @@ export class CommandHandler {
         break;
       case "help":
         await this.handleHelp(interaction);
+        break;
+      case "alias":
+        await this.handleAlias(interaction);
         break;
       default:
         await interaction.reply({
@@ -170,7 +175,39 @@ export class CommandHandler {
       .setName("help")
       .setDescription("利用可能なコマンドと使い方を表示する");
 
-    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd];
+    const aliasCmd = new SlashCommandBuilder()
+      .setName("alias")
+      .setDescription("プロジェクトエイリアスの管理")
+      .addSubcommand((sub) =>
+        sub
+          .setName("add")
+          .setDescription("エイリアスを追加する")
+          .addStringOption((opt) =>
+            opt.setName("name").setDescription("エイリアス名").setRequired(true)
+          )
+          .addStringOption((opt) =>
+            opt.setName("path").setDescription("プロジェクトパス").setRequired(true)
+          )
+          .addStringOption((opt) =>
+            opt
+              .setName("worker")
+              .setDescription("優先Worker名")
+              .setRequired(false)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("remove")
+          .setDescription("エイリアスを削除する")
+          .addStringOption((opt) =>
+            opt.setName("name").setDescription("エイリアス名").setRequired(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub.setName("list").setDescription("エイリアス一覧を表示する")
+      ) as SlashCommandBuilder;
+
+    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd, aliasCmd];
   }
 
   // --- Command handlers ---
@@ -190,6 +227,26 @@ export class CommandHandler {
     let permissionMode: PermissionMode = PermissionMode.AcceptEdits;
     if (modeStr) {
       permissionMode = modeStr as PermissionMode;
+    }
+
+    // エイリアス解決
+    let resolvedCwd: string | null = directory;
+    let resolvedWorker: string | null = workerName;
+    if (directory && this.aliasManager) {
+      const resolved = this.aliasManager.resolve(directory);
+      if (resolved === null) {
+        // @付きだがエイリアスが見つからない
+        await interaction.reply({
+          content: `Alias "${directory}" not found. Use \`/alias list\` to see available aliases.`,
+          ephemeral: true,
+        });
+        return;
+      }
+      resolvedCwd = resolved.resolvedPath;
+      // エイリアスに優先Workerが設定されていて、コマンドでWorker未指定の場合
+      if (!workerName && resolved.preferredWorker) {
+        resolvedWorker = resolved.preferredWorker;
+      }
     }
 
     // 添付ファイルのサイズ検証
@@ -223,8 +280,8 @@ export class CommandHandler {
     const options: TaskCreateOptions = {
       prompt,
       requestedBy: interaction.user.id,
-      workerId: workerName,
-      cwd: directory,
+      workerId: resolvedWorker,
+      cwd: resolvedCwd,
       permissionMode,
       teamMode,
       continueSession,

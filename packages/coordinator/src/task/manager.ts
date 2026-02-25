@@ -420,6 +420,23 @@ export class TaskManager {
         }
       }
     }
+
+    // キューにタスクがあれば他のWorkerにディスパッチ
+    await this.dispatchNext();
+  }
+
+  /**
+   * 新しいWorkerが接続された際にキューからタスクをディスパッチする
+   */
+  async handleWorkerConnected(): Promise<void> {
+    await this.dispatchNext();
+  }
+
+  /**
+   * キュー内タスク一覧を取得
+   */
+  getQueuedTasks(): Task[] {
+    return this.getAllTasks().filter((t) => t.status === TaskStatus.Queued);
   }
 
   /**

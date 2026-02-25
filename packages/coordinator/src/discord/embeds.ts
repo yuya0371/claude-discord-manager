@@ -139,49 +139,162 @@ export function buildTaskEmbed(task: Task): EmbedBuilder {
 }
 
 /**
- * Worker一覧のEmbed生成
+ * Worker一覧のEmbed生成（強化版）
  */
 export function buildWorkersEmbed(workers: WorkerInfo[]): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setColor(Colors.Blurple)
-    .setTitle("Worker List");
+    .setTitle("Worker List")
+    .setTimestamp();
 
   if (workers.length === 0) {
     embed.setDescription("No workers connected.");
     return embed;
   }
 
-  const lines: string[] = [];
+  const now = Date.now();
   for (const w of workers) {
     const statusIcon =
       w.status === WorkerStatus.Online
-        ? "[ONLINE]"
+        ? "ONLINE"
         : w.status === WorkerStatus.Busy
-          ? "[BUSY]"
-          : "[OFFLINE]";
+          ? "BUSY"
+          : "OFFLINE";
 
-    lines.push(`${statusIcon} ${w.name}`);
-    lines.push(`  OS: ${w.os} | Node: ${w.nodeVersion}`);
-    lines.push(`  Claude CLI: ${w.claudeCliVersion}`);
+    const connectedAgo = formatDuration(now - w.connectedAt);
+    const heartbeatAgo = formatDuration(now - w.lastHeartbeat);
+    const heartbeatStatus = (now - w.lastHeartbeat) > 60_000 ? " (stale)" : "";
+
+    const infoLines: string[] = [
+      `Status: **${statusIcon}**`,
+      `OS: ${w.os} | Node: ${w.nodeVersion} | CLI: ${w.claudeCliVersion}`,
+      `Connected: ${connectedAgo} ago | Heartbeat: ${heartbeatAgo} ago${heartbeatStatus}`,
+    ];
 
     if (w.currentTaskId) {
-      lines.push(`  Task: ${w.currentTaskId}`);
+      infoLines.push(`Current Task: **${w.currentTaskId}**`);
     }
 
-    const connectedAgo = formatDuration(Date.now() - w.connectedAt);
-    lines.push(`  Connected: ${connectedAgo} ago`);
-    lines.push("");
+    if (w.allowedDirs.length > 0) {
+      infoLines.push(`Dirs: ${w.allowedDirs.join(", ")}`);
+    }
+
+    embed.addFields({
+      name: `[${statusIcon}] ${w.name}`,
+      value: infoLines.join("\n"),
+    });
   }
 
   const onlineCount = workers.filter(
-    (w) => w.status !== WorkerStatus.Offline
+    (w) => w.status === WorkerStatus.Online
   ).length;
-  lines.push(`Total: ${workers.length} (Online: ${onlineCount})`);
+  const busyCount = workers.filter(
+    (w) => w.status === WorkerStatus.Busy
+  ).length;
 
-  const description = lines.join("\n");
-  embed.setDescription(
-    "```\n" + truncateText(description, DISCORD_EMBED_MAX_LENGTH - 10) + "\n```"
-  );
+  embed.setFooter({
+    text: `Total: ${workers.length} | Online: ${onlineCount} | Busy: ${busyCount}`,
+  });
+
+  return embed;
+}
+
+/**
+ * ステータスサマリーEmbed生成（ピン留め用の定期更新メッセージ）
+ */
+export function buildStatusSummaryEmbed(
+  workers: WorkerInfo[],
+  runningTasks: Task[],
+  queuedTasks: Task[]
+): EmbedBuilder {
+  const now = Date.now();
+
+  const onlineCount = workers.filter(
+    (w) => w.status === WorkerStatus.Online
+  ).length;
+  const busyCount = workers.filter(
+    (w) => w.status === WorkerStatus.Busy
+  ).length;
+
+  // 全体ステータスに応じた色
+  let color: number;
+  if (workers.length === 0) {
+    color = Colors.Grey;
+  } else if (queuedTasks.length > 0 && onlineCount === 0) {
+    color = Colors.Red; // キューにタスクがあるが利用可能なWorkerがない
+  } else if (busyCount > 0) {
+    color = Colors.Blue; // 実行中
+  } else {
+    color = Colors.Green; // アイドル
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle("System Status")
+    .setTimestamp();
+
+  // Workers セクション
+  if (workers.length === 0) {
+    embed.addFields({
+      name: "Workers",
+      value: "No workers connected.",
+    });
+  } else {
+    const workerLines: string[] = [];
+    for (const w of workers) {
+      const icon =
+        w.status === WorkerStatus.Online
+          ? "[ OK ]"
+          : w.status === WorkerStatus.Busy
+            ? "[BUSY]"
+            : "[OFF ]";
+      const taskInfo = w.currentTaskId ? ` -> ${w.currentTaskId}` : "";
+      workerLines.push(`${icon} ${w.name}${taskInfo}`);
+    }
+    embed.addFields({
+      name: `Workers (${onlineCount} online, ${busyCount} busy)`,
+      value: "```\n" + workerLines.join("\n") + "\n```",
+    });
+  }
+
+  // Running Tasks セクション
+  if (runningTasks.length > 0) {
+    const taskLines = runningTasks.map((t) => {
+      const elapsed = formatDuration(now - (t.startedAt ?? t.createdAt));
+      const promptShort = t.prompt.substring(0, 40) + (t.prompt.length > 40 ? "..." : "");
+      return `${t.id} (${elapsed}) ${promptShort}`;
+    });
+    embed.addFields({
+      name: `Running Tasks (${runningTasks.length})`,
+      value: "```\n" + truncateText(taskLines.join("\n"), 1018) + "\n```",
+    });
+  }
+
+  // Queued Tasks セクション
+  if (queuedTasks.length > 0) {
+    const queueLines = queuedTasks.slice(0, 10).map((t, i) => {
+      const promptShort = t.prompt.substring(0, 40) + (t.prompt.length > 40 ? "..." : "");
+      return `#${i + 1} ${t.id}: ${promptShort}`;
+    });
+    if (queuedTasks.length > 10) {
+      queueLines.push(`... and ${queuedTasks.length - 10} more`);
+    }
+    embed.addFields({
+      name: `Queue (${queuedTasks.length})`,
+      value: "```\n" + truncateText(queueLines.join("\n"), 1018) + "\n```",
+    });
+  }
+
+  if (runningTasks.length === 0 && queuedTasks.length === 0) {
+    embed.addFields({
+      name: "Tasks",
+      value: "No active tasks.",
+    });
+  }
+
+  embed.setFooter({
+    text: `Last updated`,
+  });
 
   return embed;
 }

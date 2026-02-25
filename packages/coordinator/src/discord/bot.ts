@@ -4,6 +4,7 @@ import {
   ChatInputCommandInteraction,
   TextChannel,
   Events,
+  Message,
 } from "discord.js";
 import {
   Task,
@@ -16,11 +17,15 @@ import {
   buildTaskEmbed,
   buildWorkerConnectedEmbed,
   buildWorkerDisconnectedEmbed,
+  buildStatusSummaryEmbed,
   isLongResult,
   splitTextForDiscord,
 } from "./embeds.js";
 import { TaskManager } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
+
+/** ステータスサマリーの更新間隔（30秒） */
+const STATUS_SUMMARY_UPDATE_INTERVAL_MS = 30_000;
 
 export interface DiscordBotConfig {
   token: string;
@@ -39,6 +44,11 @@ export class DiscordBot {
   private buttonHandler: ButtonHandler | null = null;
   private statusChannelId: string;
   private workersChannelId: string;
+
+  /** ピン留めステータスサマリーメッセージのID */
+  private statusSummaryMessageId: string | null = null;
+  /** ステータスサマリー定期更新タイマー */
+  private statusSummaryTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly config: DiscordBotConfig,
@@ -85,6 +95,12 @@ export class DiscordBot {
         this.config.token,
         this.config.guildId
       );
+
+      // ステータスサマリーのピン留めメッセージを初期化
+      await this.initStatusSummary();
+
+      // ステータスサマリーの定期更新を開始
+      this.startStatusSummaryUpdater();
     });
 
     // interactionCreate イベント
@@ -133,6 +149,13 @@ export class DiscordBot {
    * Botを停止する
    */
   async stop(): Promise<void> {
+    if (this.statusSummaryTimer) {
+      clearInterval(this.statusSummaryTimer);
+      this.statusSummaryTimer = null;
+    }
+    if (this.buttonHandler) {
+      this.buttonHandler.clearAllTimeouts();
+    }
     this.client.destroy();
     console.log("Discord Bot stopped");
   }
@@ -151,9 +174,12 @@ export class DiscordBot {
     this.taskManager.callbacks = {
       onTaskQueued: async (task) => {
         // Embed投稿はcommands.tsのhandleTask内で実施済み
+        // ステータスサマリーを即座に更新
+        await this.updateStatusSummary();
       },
       onTaskStarted: async (task) => {
         await this.updateTaskEmbed(task);
+        await this.updateStatusSummary();
       },
       onTaskStreamUpdate: async (task) => {
         await this.updateTaskEmbed(task);
@@ -164,12 +190,15 @@ export class DiscordBot {
           await this.handleLongResultOutput(task);
         }
         await this.updateTaskEmbed(task);
+        await this.updateStatusSummary();
       },
       onTaskFailed: async (task) => {
         await this.updateTaskEmbed(task);
+        await this.updateStatusSummary();
       },
       onTaskCancelled: async (task) => {
         await this.updateTaskEmbed(task);
+        await this.updateStatusSummary();
       },
       onTaskQuestion: async (taskId, payload) => {
         const channel = this.client.channels.cache.get(this.statusChannelId);
@@ -264,15 +293,117 @@ export class DiscordBot {
 
     this.workerRegistry.onWorkerConnected = (worker) => {
       this.postWorkerConnectedNotification(worker).catch(console.error);
+      // 新しいWorkerが接続されたらキューからディスパッチを試行
+      this.taskManager.handleWorkerConnected().catch(console.error);
+      // ステータスサマリーを更新
+      this.updateStatusSummary().catch(console.error);
     };
 
     this.workerRegistry.onWorkerDisconnected = (workerId, hadRunningTask) => {
       this.postWorkerDisconnectedNotification(workerId).catch(console.error);
+      // ステータスサマリーを更新
+      this.updateStatusSummary().catch(console.error);
       if (existingDisconnectCb) {
         existingDisconnectCb(workerId, hadRunningTask);
       }
     };
   }
+
+  // ─── ステータスサマリー管理 ───
+
+  /**
+   * #status チャンネルにステータスサマリーのピン留めメッセージを作成/復元する
+   */
+  private async initStatusSummary(): Promise<void> {
+    try {
+      const channel = this.client.channels.cache.get(this.statusChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const textChannel = channel as TextChannel;
+
+      // 既存のピン留めメッセージからBot自身のステータスサマリーを検索
+      const pinnedMessages = await textChannel.messages.fetchPinned().catch(() => null);
+      if (pinnedMessages) {
+        const botId = this.client.user?.id;
+        const existingSummary = pinnedMessages.find(
+          (msg) =>
+            msg.author.id === botId &&
+            msg.embeds.length > 0 &&
+            msg.embeds[0].title === "System Status"
+        );
+
+        if (existingSummary) {
+          this.statusSummaryMessageId = existingSummary.id;
+          console.log(`Found existing status summary message: ${existingSummary.id}`);
+          // 既存メッセージを最新状態に更新
+          await this.updateStatusSummary();
+          return;
+        }
+      }
+
+      // 新規作成
+      const embed = buildStatusSummaryEmbed(
+        this.workerRegistry.getAllWorkers(),
+        this.taskManager.getRunningTasks(),
+        this.taskManager.getQueuedTasks()
+      );
+      const msg = await textChannel.send({ embeds: [embed] });
+      this.statusSummaryMessageId = msg.id;
+
+      // ピン留め
+      await msg.pin().catch((err) => {
+        console.warn("Failed to pin status summary message:", err);
+      });
+
+      console.log(`Created and pinned status summary message: ${msg.id}`);
+    } catch (error) {
+      console.error("Failed to initialize status summary:", error);
+    }
+  }
+
+  /**
+   * ステータスサマリーメッセージを更新する
+   */
+  private async updateStatusSummary(): Promise<void> {
+    if (!this.statusSummaryMessageId) return;
+
+    try {
+      const channel = this.client.channels.cache.get(this.statusChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const textChannel = channel as TextChannel;
+      const message = await textChannel.messages
+        .fetch(this.statusSummaryMessageId)
+        .catch(() => null);
+
+      if (!message) {
+        // メッセージが削除されていた場合は再作成
+        this.statusSummaryMessageId = null;
+        await this.initStatusSummary();
+        return;
+      }
+
+      const embed = buildStatusSummaryEmbed(
+        this.workerRegistry.getAllWorkers(),
+        this.taskManager.getRunningTasks(),
+        this.taskManager.getQueuedTasks()
+      );
+      await message.edit({ embeds: [embed] });
+    } catch (error) {
+      console.error("Failed to update status summary:", error);
+    }
+  }
+
+  /**
+   * ステータスサマリーの定期更新を開始する
+   */
+  private startStatusSummaryUpdater(): void {
+    this.statusSummaryTimer = setInterval(() => {
+      this.updateStatusSummary().catch(console.error);
+    }, STATUS_SUMMARY_UPDATE_INTERVAL_MS);
+  }
+
+  // ─── Worker通知 ───
 
   /**
    * #workers チャンネルに Worker 接続通知を投稿
