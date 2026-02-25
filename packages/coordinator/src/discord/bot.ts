@@ -569,7 +569,10 @@ export class DiscordBot {
       if (!channel || !channel.isTextBased()) return;
 
       const embed = buildWorkerDisconnectedEmbed(workerName, "Connection lost");
-      await (channel as TextChannel).send({ embeds: [embed] });
+      await withDiscordRetry(
+        () => (channel as TextChannel).send({ embeds: [embed] }),
+        "postWorkerDisconnected"
+      );
     } catch (error) {
       console.error("Failed to post worker disconnected notification:", error);
     }
@@ -593,7 +596,10 @@ export class DiscordBot {
         task.tokenUsage,
         task.prompt
       );
-      await (channel as TextChannel).send({ embeds: [embed] });
+      await withDiscordRetry(
+        () => (channel as TextChannel).send({ embeds: [embed] }),
+        "postTokenUsageNotification"
+      );
     } catch (error) {
       console.error("Failed to post token usage notification:", error);
     }
@@ -672,7 +678,10 @@ export class DiscordBot {
       if (!channel || !channel.isTextBased()) return;
 
       const embed = buildTeamUpdateEmbed(teamInfo);
-      await (channel as TextChannel).send({ embeds: [embed] });
+      await withDiscordRetry(
+        () => (channel as TextChannel).send({ embeds: [embed] }),
+        "postTeamUpdateNotification"
+      );
     } catch (error) {
       console.error("Failed to post team update notification:", error);
     }
