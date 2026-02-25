@@ -60,6 +60,9 @@ export class ClaudeExecutor extends EventEmitter {
 
     console.log(`[Executor] Spawning: claude ${args.join(" ")}`);
     console.log(`[Executor] CWD: ${options.cwd}`);
+    if (options.sessionId) {
+      console.log(`[Executor] Resuming session: ${options.sessionId}`);
+    }
 
     // CWD の存在チェック
     if (!existsSync(options.cwd)) {
@@ -110,8 +113,9 @@ export class ClaudeExecutor extends EventEmitter {
       this.emit("stderr", text);
     });
 
-    // プロセス終了
-    this.process.on("exit", (code, signal) => {
+    // プロセス終了: close イベントを使うことで、stdio ストリームが
+    // 全て閉じた後に発火する（stderr のデータを取りこぼさない）
+    this.process.on("close", (code, signal) => {
       this._running = false;
       this.process = null;
 
