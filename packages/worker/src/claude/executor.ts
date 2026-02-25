@@ -86,6 +86,7 @@ export class ClaudeExecutor extends EventEmitter {
         cwd: options.cwd,
         env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
+        shell: true,
       });
 
       // stdin パイプを即座に end() して EOF を送信する。
