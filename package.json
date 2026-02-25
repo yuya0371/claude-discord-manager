@@ -27,7 +27,7 @@
     "pm2:status": "pm2 status"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "devDependencies": {
     "vitest": "^4.0.18"
