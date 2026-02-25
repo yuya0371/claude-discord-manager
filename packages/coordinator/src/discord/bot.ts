@@ -7,6 +7,9 @@ import {
   Events,
   Message,
   RESTJSONErrorCodes,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } from "discord.js";
 import {
   Task,
@@ -367,8 +370,21 @@ export class DiscordBot {
       if (!message) return;
 
       const embed = buildTaskEmbed(task);
+
+      // 完了タスクにはセッション継続用の「返信」ボタンを追加
+      const components: ActionRowBuilder<ButtonBuilder>[] = [];
+      if (task.status === "completed" && task.sessionId) {
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`reply:${task.id}:${task.sessionId}`)
+            .setLabel("返信")
+            .setStyle(ButtonStyle.Primary),
+        );
+        components.push(row);
+      }
+
       await withDiscordRetry(
-        () => message.edit({ embeds: [embed] }),
+        () => message.edit({ embeds: [embed], components }),
         `updateTaskEmbed(${task.id})`
       );
     } catch (error) {

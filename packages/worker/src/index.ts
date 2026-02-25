@@ -81,6 +81,11 @@ class WorkerApp {
   private lastSessionId: string | null = null;
   private stderrBuffer = "";
 
+  /** 質問応答待ち状態: CLI 終了を保留し、回答を待つ */
+  private waitingForAnswer = false;
+  /** 質問応答待ち中のタスク実行オプション（--resume 用に保持） */
+  private pendingTaskOptions: ExecuteOptions | null = null;
+
   constructor() {
     this.wsClient = new WsClient({
       coordinatorUrl: COORDINATOR_URL,
@@ -203,6 +208,8 @@ class WorkerApp {
     this.lastResultText = "";
     this.lastSessionId = null;
     this.stderrBuffer = "";
+    this.waitingForAnswer = false;
+    this.pendingTaskOptions = null;
 
     this.wsClient.setStatus(WorkerStatus.Busy, payload.taskId);
 
@@ -220,6 +227,7 @@ class WorkerApp {
         .map((a) => a.localPath as string),
     };
 
+    this.pendingTaskOptions = options;
     this.executor.execute(options);
   }
 
@@ -262,17 +270,58 @@ class WorkerApp {
     }
   }
 
-  /** 質問回答ハンドラ */
+  /** 質問回答ハンドラ: セッション継続で新しい CLI 実行を開始する */
   private handleTaskAnswer(payload: TaskAnswerPayload): void {
-    console.log(`[Worker] Answer received for question ${payload.questionId}`);
-    this.executor.writeStdin(payload.answer);
+    console.log(`[Worker] Answer received for question ${payload.questionId}: "${payload.answer}"`);
+    this.resumeWithAnswer(payload.answer);
   }
 
-  /** 権限応答ハンドラ */
+  /** 権限応答ハンドラ: セッション継続で新しい CLI 実行を開始する */
   private handlePermissionResponse(payload: TaskPermissionResponsePayload): void {
-    console.log(`[Worker] Permission ${payload.granted ? "granted" : "denied"} for ${payload.permissionId}`);
-    // Claude CLI に応答を書き込む
-    this.executor.writeStdin(payload.granted ? "yes" : "no");
+    const action = payload.granted ? "granted" : "denied";
+    console.log(`[Worker] Permission ${action} for ${payload.permissionId}`);
+    const answer = payload.granted
+      ? "はい、その操作を許可します。実行してください。"
+      : "いいえ、その操作は許可しません。別の方法を検討してください。";
+    this.resumeWithAnswer(answer);
+  }
+
+  /**
+   * 回答テキストで CLI セッションを再開する。
+   * --resume <sessionId> を使い、回答をプロンプトとして渡す。
+   */
+  private resumeWithAnswer(answer: string): void {
+    if (!this.waitingForAnswer || !this.currentTaskId || !this.pendingTaskOptions) {
+      console.warn("[Worker] resumeWithAnswer called but not in waiting state");
+      return;
+    }
+
+    if (!this.lastSessionId) {
+      console.error("[Worker] Cannot resume: no session ID available");
+      return;
+    }
+
+    // 実行中のプロセスがあればキル（通常は既に終了しているはず）
+    if (this.executor.running) {
+      console.warn("[Worker] CLI still running, killing before resume");
+      void this.executor.kill();
+    }
+
+    this.waitingForAnswer = false;
+
+    // セッション継続で新しい CLI 実行を開始
+    const resumeOptions: ExecuteOptions = {
+      prompt: answer,
+      cwd: this.pendingTaskOptions.cwd,
+      permissionMode: this.pendingTaskOptions.permissionMode,
+      teamMode: this.pendingTaskOptions.teamMode,
+      sessionId: this.lastSessionId,
+      attachmentPaths: [],
+    };
+
+    console.log(`[Worker] Resuming session ${this.lastSessionId} with answer`);
+    this.stderrBuffer = "";
+    this.executor.execute(resumeOptions);
   }
 
   /** ファイル転送ハンドラ */
@@ -347,10 +396,11 @@ class WorkerApp {
       this.lastSessionId = data.sessionId;
     }
 
-    // AskUserQuestion ツール検知: task:question を Coordinator に送信
+    // AskUserQuestion ツール検知: task:question を Coordinator に送信し、回答待ち状態にする
     if (event.eventType === "tool_use_begin") {
       const data = event.data as ToolUseBeginData;
       if (data.toolName === "AskUserQuestion") {
+        this.waitingForAnswer = true;
         this.sendQuestionToCoordinator(data.summary);
       }
     }
@@ -393,6 +443,15 @@ class WorkerApp {
 
     const durationMs = Date.now() - this.taskStartTime;
     const taskId = this.currentTaskId;
+
+    // 質問応答待ち中に CLI が正常終了した場合: タスク完了を保留し、回答を待つ
+    // (stdin が閉じているため CLI は AskUserQuestion を使えず正常終了する)
+    if (this.waitingForAnswer && (code === 0 || code === null)) {
+      console.log(`[Worker] Task ${taskId}: CLI exited while waiting for answer, holding completion`);
+      // タスクタイムアウトは引き続き有効（回答が来なければタイムアウトする）
+      this.startTaskTimeout(taskId);
+      return;
+    }
 
     if (code === 0 || (code === null && signal === null)) {
       // 正常完了

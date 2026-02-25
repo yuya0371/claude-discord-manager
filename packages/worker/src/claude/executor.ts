@@ -1,6 +1,7 @@
 // packages/worker/src/claude/executor.ts
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { PermissionMode } from "@claude-discord/common";
 import { StreamJsonParser, type ParsedEvent } from "./parser.js";
@@ -60,12 +61,35 @@ export class ClaudeExecutor extends EventEmitter {
     console.log(`[Executor] Spawning: claude ${args.join(" ")}`);
     console.log(`[Executor] CWD: ${options.cwd}`);
 
+    // CWD の存在チェック
+    if (!existsSync(options.cwd)) {
+      this._running = false;
+      const error = new Error(`Working directory does not exist: ${options.cwd}`);
+      console.error(`[Executor] ${error.message}`);
+      this.emit("error", error);
+      return;
+    }
+
+    // 親プロセス (Claude Code) の環境変数を除外して子プロセスに渡す
+    const childEnv = { ...process.env };
+    for (const key of Object.keys(childEnv)) {
+      if (key.startsWith("CLAUDE")) {
+        delete childEnv[key];
+      }
+    }
+
     try {
       this.process = spawn("claude", args, {
         cwd: options.cwd,
-        env: { ...process.env },
+        env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
       });
+
+      // stdin パイプを即座に end() して EOF を送信する。
+      // Claude CLI は stdin がパイプだとデータ待ちでハングするため、
+      // EOF を送ることで通常の -p モード実行として進行させる。
+      // 質問応答はセッション継続 (--resume) で対応する。
+      this.process.stdin?.end();
     } catch (err) {
       this._running = false;
       const error = err instanceof Error ? err : new Error(String(err));
@@ -139,10 +163,10 @@ export class ClaudeExecutor extends EventEmitter {
   }
 
   /** stdin に入力を書き込む(質問応答・権限応答用) */
-  writeStdin(input: string): void {
-    if (this.process?.stdin?.writable) {
-      this.process.stdin.write(input + "\n");
-    }
+  writeStdin(_input: string): void {
+    // stdin は起動直後に end() しているため書き込み不可。
+    // 質問応答はセッション継続 (--resume) で対応する。
+    console.warn("[Executor] writeStdin is not supported; use session continuation instead");
   }
 
   /** CLI 引数を組み立てる */
@@ -155,7 +179,7 @@ export class ClaudeExecutor extends EventEmitter {
       prompt = `${prompt}\n\n${fileRefs}`;
     }
 
-    const args: string[] = ["-p", prompt, "--output-format", "stream-json"];
+    const args: string[] = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
 
     if (options.permissionMode === PermissionMode.Auto) {
       args.push("--dangerouslySkipPermissions");

@@ -21,6 +21,7 @@ import {
 } from "@claude-discord/common";
 import { WorkerRegistry } from "../worker/registry.js";
 import { TaskManager } from "../task/manager.js";
+import { buildTaskEmbed } from "./embeds.js";
 
 /** 質問応答のタイムアウト (5分) */
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000;
@@ -156,6 +157,9 @@ export class ButtonHandler {
       case "permission":
         await this.handlePermissionButton(interaction, parts);
         break;
+      case "reply":
+        await this.handleReplyModal(interaction, parts);
+        break;
       default:
         await interaction.reply({
           content: "Unknown action",
@@ -183,6 +187,8 @@ export class ButtonHandler {
 
     if (actionType === "question_modal") {
       await this.handleQuestionModalSubmit(interaction, parts);
+    } else if (actionType === "reply_modal") {
+      await this.handleReplyModalSubmit(interaction, parts);
     }
   }
 
@@ -425,5 +431,89 @@ export class ButtonHandler {
       content: resultText,
       components: [],
     });
+  }
+
+  // --- Reply (session continuation) handlers ---
+
+  /**
+   * 返信ボタン押下: モーダルを表示
+   * customId: reply:<taskId>:<sessionId>
+   */
+  private async handleReplyModal(
+    interaction: ButtonInteraction,
+    parts: string[]
+  ): Promise<void> {
+    const taskId = parts[1];
+    const sessionId = parts[2];
+
+    const modal = new ModalBuilder()
+      .setCustomId(`reply_modal:${taskId}:${sessionId}`)
+      .setTitle("返信を入力");
+
+    const answerInput = new TextInputBuilder()
+      .setCustomId("reply_text")
+      .setLabel("メッセージ")
+      .setPlaceholder("Claudeへの返信を入力してください")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true);
+
+    const row = new ActionRowBuilder<TextInputBuilder>().addComponents(answerInput);
+    modal.addComponents(row);
+
+    await interaction.showModal(modal);
+  }
+
+  /**
+   * 返信モーダル送信: セッション継続で新しいタスクを作成する
+   * customId: reply_modal:<taskId>:<sessionId>
+   */
+  private async handleReplyModalSubmit(
+    interaction: ModalSubmitInteraction,
+    parts: string[]
+  ): Promise<void> {
+    const originalTaskId = parts[1];
+    const sessionId = parts[2];
+
+    const replyText = interaction.fields.getTextInputValue("reply_text");
+    const originalTask = this.taskManager.getTask(originalTaskId);
+
+    if (!originalTask) {
+      await interaction.reply({
+        content: "元のタスクが見つかりません。",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    // セッション継続で新しいタスクを作成
+    const newTask = this.taskManager.createTask({
+      prompt: replyText,
+      cwd: originalTask.cwd,
+      permissionMode: originalTask.permissionMode,
+      requestedBy: interaction.user.id,
+      sessionId,
+      continueSession: true,
+    });
+
+    // #status チャンネルに Embed を投稿
+    const channel = interaction.client.channels.cache.get(this.statusChannelId);
+    if (channel && channel.isTextBased() && "send" in channel) {
+      const embed = buildTaskEmbed(newTask);
+      const msg = await (channel as TextChannel).send({ embeds: [embed] });
+      this.taskManager.setDiscordMessageId(newTask.id, msg.id);
+    }
+
+    // 元のメッセージのボタンを無効化
+    try {
+      await interaction.message?.edit({ components: [] });
+    } catch { /* ignore */ }
+
+    await interaction.reply({
+      content: `セッション継続タスク **${newTask.id}** を作成しました。`,
+      ephemeral: true,
+    });
+
+    // タスクのディスパッチ
+    await this.taskManager.dispatchNext();
   }
 }
