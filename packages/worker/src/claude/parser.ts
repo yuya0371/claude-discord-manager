@@ -31,8 +31,8 @@ export class StreamJsonParser {
 
       try {
         const json = JSON.parse(trimmed) as Record<string, unknown>;
-        const event = this.classifyEvent(json);
-        if (event) events.push(event);
+        const parsed = this.classifyEvent(json);
+        events.push(...parsed);
       } catch {
         console.warn("[Parser] Failed to parse stream-json line:", trimmed.substring(0, 120));
       }
@@ -47,19 +47,28 @@ export class StreamJsonParser {
 
   /**
    * パースした JSON オブジェクトをイベント種別に分類する。
+   * 1つの JSON 行から複数のイベントを返すことがある（本体 + token_usage 等）。
    */
-  private classifyEvent(json: Record<string, unknown>): ParsedEvent | null {
+  private classifyEvent(json: Record<string, unknown>): ParsedEvent[] {
+    const events: ParsedEvent[] = [];
     const type = json.type as string | undefined;
 
     switch (type) {
       case "assistant": {
-        const content = json.content as Array<{ type: string; text?: string }> | undefined;
+        // assistant イベント: message.content にテキスト、message.usage にトークン数
+        const message = json.message as Record<string, unknown> | undefined;
+        const content = (message?.content ?? json.content) as Array<{ type: string; text?: string }> | undefined;
         const textBlock = content?.find((c) => c.type === "text");
         if (textBlock?.text) {
-          return {
+          events.push({
             eventType: "assistant_message",
             data: { text: textBlock.text },
-          };
+          });
+        }
+        // message.usage からトークン使用量を抽出
+        const msgUsage = message?.usage as Record<string, number> | undefined;
+        if (msgUsage) {
+          events.push(this.buildTokenUsageEvent(msgUsage));
         }
         break;
       }
@@ -68,22 +77,21 @@ export class StreamJsonParser {
         const toolName = json.name as string;
         const input = (json.input as Record<string, unknown>) ?? {};
         const summary = this.buildToolSummary(toolName, input);
-        return {
+        events.push({
           eventType: "tool_use_begin",
           data: { toolName, summary },
-        };
+        });
+        break;
       }
 
-      // Claude CLI が AskUserQuestion を呼び出した場合（ユーザーへの質問）
-      // stream-json では type: "tool_use" で name: "AskUserQuestion" として出力されるが、
-      // 別のフォーマットで出力される可能性にも対応
+      // Claude CLI が AskUserQuestion を呼び出した場合
       case "ask_user": {
         const question = (json.question as string) ?? (json.text as string) ?? "";
-        const options = (json.options as string[]) ?? null;
-        return {
+        events.push({
           eventType: "tool_use_begin",
           data: { toolName: "AskUserQuestion", summary: `Question: ${question.substring(0, 80)}` },
-        };
+        });
+        break;
       }
 
       case "tool_result": {
@@ -91,40 +99,86 @@ export class StreamJsonParser {
         const isError = json.is_error as boolean | undefined;
         const content = (json.content as string) ?? "";
         const summary = this.buildToolResultSummary(toolName, content, !!isError);
-        return {
+        events.push({
           eventType: "tool_use_end",
           data: { toolName, summary, success: !isError },
-        };
+        });
+        break;
       }
 
       case "result": {
         const resultContent = (json.result as string) ?? "";
         const sessionId = (json.session_id as string) ?? null;
-        return {
+        const costUsd = (json.total_cost_usd as number) ?? null;
+        events.push({
           eventType: "result",
-          data: { text: resultContent, sessionId },
-        };
+          data: { text: resultContent, sessionId, costUsd },
+        });
+        // result イベントの modelUsage からトークン使用量を抽出（最終値）
+        const modelUsage = json.modelUsage as Record<string, Record<string, number>> | undefined;
+        if (modelUsage) {
+          // modelUsage はモデル名をキーとした辞書。全モデルのトークンを合算
+          let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0;
+          for (const model of Object.values(modelUsage)) {
+            inputTokens += model.inputTokens ?? 0;
+            outputTokens += model.outputTokens ?? 0;
+            cacheReadTokens += model.cacheReadInputTokens ?? 0;
+            cacheWriteTokens += model.cacheCreationInputTokens ?? 0;
+          }
+          events.push({
+            eventType: "token_usage",
+            data: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+          });
+        } else {
+          // フォールバック: トップレベル usage
+          const usage = json.usage as Record<string, number> | undefined;
+          if (usage) {
+            events.push(this.buildTokenUsageEvent(usage));
+          }
+        }
+        break;
       }
 
-      default:
+      // レートリミット情報（残り使用率）
+      case "rate_limit_event": {
+        const info = json.rate_limit_info as Record<string, unknown> | undefined;
+        if (info) {
+          events.push({
+            eventType: "rate_limit",
+            data: {
+              status: (info.status as string) ?? "unknown",
+              resetsAt: (info.resetsAt as number) ?? null,
+              rateLimitType: (info.rateLimitType as string) ?? null,
+            },
+          });
+        }
         break;
+      }
+
+      default: {
+        // 未知のイベントでも usage フィールドがあれば抽出
+        const usage = json.usage as Record<string, number> | undefined;
+        if (usage) {
+          events.push(this.buildTokenUsageEvent(usage));
+        }
+        break;
+      }
     }
 
-    // トークン使用量(usage フィールドがあればどのイベントでも抽出)
-    if (json.usage) {
-      const usage = json.usage as Record<string, number>;
-      return {
-        eventType: "token_usage",
-        data: {
-          inputTokens: usage.input_tokens ?? 0,
-          outputTokens: usage.output_tokens ?? 0,
-          cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-          cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
-        },
-      };
-    }
+    return events;
+  }
 
-    return null;
+  /** usage オブジェクトから token_usage イベントを生成 */
+  private buildTokenUsageEvent(usage: Record<string, number>): ParsedEvent {
+    return {
+      eventType: "token_usage",
+      data: {
+        inputTokens: usage.input_tokens ?? 0,
+        outputTokens: usage.output_tokens ?? 0,
+        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+        cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+      },
+    };
   }
 
   /** ツール呼び出しの概要文字列を生成 */
@@ -143,7 +197,6 @@ export class StreamJsonParser {
       case "Glob":
         return `Glob: ${input.pattern ?? "unknown"}`;
       case "AskUserQuestion": {
-        // Claude CLI の AskUserQuestion ツール: input.question に質問テキストが入る
         const question = (input.question as string) ?? (input.text as string) ?? "";
         return `Question: ${question.substring(0, 200)}`;
       }

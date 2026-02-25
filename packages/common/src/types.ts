@@ -232,7 +232,8 @@ export type StreamEventType =
   | "token_usage"
   | "system_message"
   | "result"
-  | "error";
+  | "error"
+  | "rate_limit";
 
 export type StreamEventData =
   | AssistantMessageData
@@ -241,7 +242,8 @@ export type StreamEventData =
   | TokenUsageData
   | SystemMessageData
   | ResultData
-  | StreamErrorData;
+  | StreamErrorData
+  | RateLimitData;
 
 export interface AssistantMessageData {
   text: string;
@@ -272,6 +274,13 @@ export interface SystemMessageData {
 export interface ResultData {
   text: string;
   sessionId: string | null;
+  costUsd?: number | null;
+}
+
+export interface RateLimitData {
+  status: string;
+  resetsAt: number | null;
+  rateLimitType: string | null;
 }
 
 export interface StreamErrorData {
