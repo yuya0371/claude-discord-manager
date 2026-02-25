@@ -10,6 +10,8 @@ import {
   Task,
   TaskQuestionPayload,
   TaskPermissionPayload,
+  TeamInfo,
+  TeamUpdatePayload,
 } from "@claude-discord/common";
 import { CommandHandler } from "./commands.js";
 import { ButtonHandler } from "./buttons.js";
@@ -18,11 +20,16 @@ import {
   buildWorkerConnectedEmbed,
   buildWorkerDisconnectedEmbed,
   buildStatusSummaryEmbed,
+  buildTokenUsageNotificationEmbed,
+  buildTeamUpdateEmbed,
+  buildTeamsListEmbed,
   isLongResult,
   splitTextForDiscord,
 } from "./embeds.js";
 import { TaskManager } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
+import { ProjectAliasManager } from "../project/aliases.js";
+import { TokenTracker } from "../token/tracker.js";
 
 /** ステータスサマリーの更新間隔（30秒） */
 const STATUS_SUMMARY_UPDATE_INTERVAL_MS = 30_000;
@@ -33,6 +40,8 @@ export interface DiscordBotConfig {
   allowedUserIds: string[];
   statusChannelId: string;
   workersChannelId: string;
+  tokenUsageChannelId?: string;
+  teamsChannelId?: string;
 }
 
 /**
@@ -44,6 +53,14 @@ export class DiscordBot {
   private buttonHandler: ButtonHandler | null = null;
   private statusChannelId: string;
   private workersChannelId: string;
+  private tokenUsageChannelId: string | null;
+  private teamsChannelId: string | null = null;
+
+  /** トークン使用量トラッカー */
+  private tokenTracker: TokenTracker;
+
+  /** アクティブなチーム情報のキャッシュ */
+  private activeTeams: Map<string, TeamInfo> = new Map();
 
   /** ピン留めステータスサマリーメッセージのID */
   private statusSummaryMessageId: string | null = null;
@@ -53,10 +70,14 @@ export class DiscordBot {
   constructor(
     private readonly config: DiscordBotConfig,
     private readonly taskManager: TaskManager,
-    private readonly workerRegistry: WorkerRegistry
+    private readonly workerRegistry: WorkerRegistry,
+    private readonly aliasManager?: ProjectAliasManager
   ) {
     this.statusChannelId = config.statusChannelId;
     this.workersChannelId = config.workersChannelId;
+    this.tokenUsageChannelId = config.tokenUsageChannelId ?? null;
+    this.teamsChannelId = config.teamsChannelId ?? null;
+    this.tokenTracker = new TokenTracker();
 
     this.client = new Client({
       intents: [
@@ -75,8 +96,13 @@ export class DiscordBot {
       this.taskManager,
       this.workerRegistry,
       this.config.allowedUserIds,
-      this.statusChannelId
+      this.statusChannelId,
+      this.aliasManager,
+      this.tokenTracker
     );
+
+    // /teams コマンド用のチーム情報プロバイダを設定
+    this.commandHandler.teamsProvider = () => this.getActiveTeams();
 
     // ボタンハンドラ初期化
     this.buttonHandler = new ButtonHandler(
@@ -191,10 +217,22 @@ export class DiscordBot {
         }
         await this.updateTaskEmbed(task);
         await this.updateStatusSummary();
+
+        // トークン使用量を記録・通知
+        if (task.workerId) {
+          this.tokenTracker.record(task.id, task.workerId, task.tokenUsage);
+          await this.postTokenUsageNotification(task);
+        }
       },
       onTaskFailed: async (task) => {
         await this.updateTaskEmbed(task);
         await this.updateStatusSummary();
+
+        // トークン使用量を記録（失敗時も記録する）
+        if (task.workerId && (task.tokenUsage.inputTokens > 0 || task.tokenUsage.outputTokens > 0)) {
+          this.tokenTracker.record(task.id, task.workerId, task.tokenUsage);
+          await this.postTokenUsageNotification(task);
+        }
       },
       onTaskCancelled: async (task) => {
         await this.updateTaskEmbed(task);
@@ -436,6 +474,76 @@ export class DiscordBot {
       await (channel as TextChannel).send({ embeds: [embed] });
     } catch (error) {
       console.error("Failed to post worker disconnected notification:", error);
+    }
+  }
+
+  // ─── Token Usage 通知 ───
+
+  /**
+   * #token-usage チャンネルにタスク完了時のトークン使用量を投稿する
+   */
+  private async postTokenUsageNotification(task: Task): Promise<void> {
+    if (!this.tokenUsageChannelId) return;
+
+    try {
+      const channel = this.client.channels.cache.get(this.tokenUsageChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const embed = buildTokenUsageNotificationEmbed(
+        task.id,
+        task.workerId ?? "unknown",
+        task.tokenUsage,
+        task.prompt
+      );
+      await (channel as TextChannel).send({ embeds: [embed] });
+    } catch (error) {
+      console.error("Failed to post token usage notification:", error);
+    }
+  }
+
+  /**
+   * TokenTrackerインスタンスを取得する
+   */
+  getTokenTracker(): TokenTracker {
+    return this.tokenTracker;
+  }
+
+  // ─── Team 通知 ───
+
+  /**
+   * team:update を受信した際のハンドラ
+   */
+  async handleTeamUpdate(_workerId: string, payload: TeamUpdatePayload): Promise<void> {
+    const teamInfo = payload.teamInfo;
+
+    // キャッシュに保存
+    this.activeTeams.set(teamInfo.teamName, teamInfo);
+
+    // #teams チャンネルに投稿
+    await this.postTeamUpdateNotification(teamInfo);
+  }
+
+  /**
+   * アクティブなチーム情報一覧を取得する
+   */
+  getActiveTeams(): TeamInfo[] {
+    return Array.from(this.activeTeams.values());
+  }
+
+  /**
+   * #teams チャンネルにチーム更新通知を投稿する
+   */
+  private async postTeamUpdateNotification(teamInfo: TeamInfo): Promise<void> {
+    if (!this.teamsChannelId) return;
+
+    try {
+      const channel = this.client.channels.cache.get(this.teamsChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const embed = buildTeamUpdateEmbed(teamInfo);
+      await (channel as TextChannel).send({ embeds: [embed] });
+    } catch (error) {
+      console.error("Failed to post team update notification:", error);
     }
   }
 }

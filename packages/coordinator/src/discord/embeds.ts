@@ -2,11 +2,18 @@ import { EmbedBuilder, Colors } from "discord.js";
 import {
   Task,
   TaskStatus,
+  TokenUsage,
+  TokenUsageRecord,
   WorkerInfo,
   WorkerStatus,
+  TeamInfo,
   DISCORD_EMBED_MAX_LENGTH,
   DISCORD_MESSAGE_MAX_LENGTH,
 } from "@claude-discord/common";
+import {
+  TokenSummary,
+  WorkerTokenSummary,
+} from "../token/tracker.js";
 
 /** 長文判定の閾値 */
 const LONG_TEXT_THRESHOLD = DISCORD_MESSAGE_MAX_LENGTH;
@@ -446,4 +453,271 @@ function formatDuration(ms: number): string {
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+/**
+ * トークン数を見やすくフォーマットする (例: 1,234 or 1.2M)
+ */
+function formatTokenCount(count: number): string {
+  if (count >= 1_000_000) {
+    return `${(count / 1_000_000).toFixed(1)}M`;
+  }
+  return count.toLocaleString();
+}
+
+// ─── Token Usage Embeds ───
+
+/**
+ * 今日のトークン使用量サマリーEmbed生成
+ */
+export function buildTokenSummaryEmbed(
+  todaySummary: TokenSummary,
+  cumulativeSummary: TokenSummary
+): EmbedBuilder {
+  const today = new Date();
+  const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
+
+  const embed = new EmbedBuilder()
+    .setColor(Colors.Gold)
+    .setTitle("Token Usage Summary")
+    .setDescription(`Date: **${dateStr}**`)
+    .setTimestamp();
+
+  const todayTotal =
+    todaySummary.totalInput + todaySummary.totalOutput;
+
+  embed.addFields(
+    {
+      name: "Today",
+      value: [
+        `Tasks: **${todaySummary.taskCount}**`,
+        `Total: **${formatTokenCount(todayTotal)}** tokens`,
+        `Input: ${formatTokenCount(todaySummary.totalInput)}`,
+        `Output: ${formatTokenCount(todaySummary.totalOutput)}`,
+        `Cache Read: ${formatTokenCount(todaySummary.totalCacheRead)}`,
+        `Cache Write: ${formatTokenCount(todaySummary.totalCacheWrite)}`,
+      ].join("\n"),
+    },
+    {
+      name: "Cumulative",
+      value: [
+        `Tasks: **${cumulativeSummary.taskCount}**`,
+        `Total: **${formatTokenCount(cumulativeSummary.totalInput + cumulativeSummary.totalOutput)}** tokens`,
+        `Input: ${formatTokenCount(cumulativeSummary.totalInput)}`,
+        `Output: ${formatTokenCount(cumulativeSummary.totalOutput)}`,
+      ].join("\n"),
+    }
+  );
+
+  return embed;
+}
+
+/**
+ * タスク別トークン使用量詳細Embed生成
+ */
+export function buildTokenDetailEmbed(
+  records: TokenUsageRecord[]
+): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(Colors.Gold)
+    .setTitle("Token Usage - Task Detail")
+    .setTimestamp();
+
+  if (records.length === 0) {
+    embed.setDescription("No token usage records for today.");
+    return embed;
+  }
+
+  // 最新20件を表示
+  const recentRecords = records.slice(-20);
+  const lines: string[] = [];
+
+  for (const r of recentRecords) {
+    const total = r.usage.inputTokens + r.usage.outputTokens;
+    const time = new Date(r.timestamp);
+    const timeStr = `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`;
+    lines.push(
+      `\`${timeStr}\` **${r.taskId}** (${r.workerId}): ${formatTokenCount(total)} [In:${formatTokenCount(r.usage.inputTokens)} Out:${formatTokenCount(r.usage.outputTokens)}]`
+    );
+  }
+
+  if (records.length > 20) {
+    lines.unshift(`_Showing latest 20 of ${records.length} records_\n`);
+  }
+
+  embed.setDescription(truncateText(lines.join("\n"), 4096));
+
+  return embed;
+}
+
+/**
+ * Worker別トークン使用量Embed生成
+ */
+export function buildTokenWorkerEmbed(
+  workerSummaries: WorkerTokenSummary[]
+): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(Colors.Gold)
+    .setTitle("Token Usage - By Worker")
+    .setTimestamp();
+
+  if (workerSummaries.length === 0) {
+    embed.setDescription("No token usage records for today.");
+    return embed;
+  }
+
+  for (const ws of workerSummaries) {
+    const total = ws.summary.totalInput + ws.summary.totalOutput;
+    embed.addFields({
+      name: ws.workerId,
+      value: [
+        `Tasks: **${ws.summary.taskCount}** | Total: **${formatTokenCount(total)}**`,
+        `Input: ${formatTokenCount(ws.summary.totalInput)} | Output: ${formatTokenCount(ws.summary.totalOutput)}`,
+        `Cache Read: ${formatTokenCount(ws.summary.totalCacheRead)} | Cache Write: ${formatTokenCount(ws.summary.totalCacheWrite)}`,
+      ].join("\n"),
+    });
+  }
+
+  return embed;
+}
+
+/**
+ * タスク完了時のトークン使用量通知Embed生成
+ */
+export function buildTokenUsageNotificationEmbed(
+  taskId: string,
+  workerId: string,
+  usage: TokenUsage,
+  prompt: string
+): EmbedBuilder {
+  const total = usage.inputTokens + usage.outputTokens;
+  const promptDisplay =
+    prompt.length > 100 ? prompt.substring(0, 100) + "..." : prompt;
+
+  return new EmbedBuilder()
+    .setColor(Colors.Gold)
+    .setTitle(`Token Usage - ${taskId}`)
+    .setDescription(promptDisplay)
+    .addFields(
+      {
+        name: "Total",
+        value: `**${formatTokenCount(total)}** tokens`,
+        inline: true,
+      },
+      {
+        name: "Worker",
+        value: workerId,
+        inline: true,
+      },
+      {
+        name: "Breakdown",
+        value: [
+          `Input: ${formatTokenCount(usage.inputTokens)}`,
+          `Output: ${formatTokenCount(usage.outputTokens)}`,
+          `Cache Read: ${formatTokenCount(usage.cacheReadTokens)}`,
+          `Cache Write: ${formatTokenCount(usage.cacheWriteTokens)}`,
+        ].join("\n"),
+      }
+    )
+    .setTimestamp();
+}
+
+// ─── Team Embeds ───
+
+/**
+ * チーム更新通知のEmbed生成
+ */
+export function buildTeamUpdateEmbed(teamInfo: TeamInfo): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(Colors.Purple)
+    .setTitle(`[Team] ${teamInfo.teamName}`)
+    .setTimestamp();
+
+  // メンバー一覧
+  if (teamInfo.members.length > 0) {
+    const memberLines = teamInfo.members.map((m) => {
+      const statusIcon =
+        m.status === "active" ? "[ACT]" : m.status === "idle" ? "[IDL]" : "[OFF]";
+      return `${statusIcon} ${m.name} (${m.agentType})`;
+    });
+    embed.addFields({
+      name: `Members (${teamInfo.members.length})`,
+      value: "```\n" + truncateText(memberLines.join("\n"), 1018) + "\n```",
+    });
+  }
+
+  // タスク一覧
+  if (teamInfo.tasks.length > 0) {
+    const taskLines = teamInfo.tasks.slice(0, 15).map((t) => {
+      const statusIcon =
+        t.status === "completed"
+          ? "[DONE]"
+          : t.status === "in_progress"
+            ? "[RUN ]"
+            : "[WAIT]";
+      const owner = t.owner ? ` (${t.owner})` : "";
+      return `${statusIcon} ${t.subject}${owner}`;
+    });
+    if (teamInfo.tasks.length > 15) {
+      taskLines.push(`... and ${teamInfo.tasks.length - 15} more`);
+    }
+    embed.addFields({
+      name: `Tasks (${teamInfo.tasks.length})`,
+      value: "```\n" + truncateText(taskLines.join("\n"), 1018) + "\n```",
+    });
+  }
+
+  // 最近のメッセージ（最新5件）
+  if (teamInfo.recentMessages.length > 0) {
+    const msgLines = teamInfo.recentMessages.slice(-5).map((m) => {
+      const summaryShort =
+        m.summary.length > 60
+          ? m.summary.substring(0, 60) + "..."
+          : m.summary;
+      return `**${m.from}** -> **${m.to}**: ${summaryShort}`;
+    });
+    embed.addFields({
+      name: "Recent Messages",
+      value: truncateText(msgLines.join("\n"), 1024),
+    });
+  }
+
+  embed.setFooter({ text: `Worker: ${teamInfo.workerId}` });
+
+  return embed;
+}
+
+/**
+ * アクティブチーム一覧のEmbed生成（/teams コマンド用）
+ */
+export function buildTeamsListEmbed(teams: TeamInfo[]): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(Colors.Purple)
+    .setTitle("Active Teams")
+    .setTimestamp();
+
+  if (teams.length === 0) {
+    embed.setDescription("No active teams.");
+    return embed;
+  }
+
+  for (const team of teams) {
+    const memberNames = team.members.map((m) => m.name).join(", ");
+    const runningTasks = team.tasks.filter((t) => t.status === "in_progress").length;
+    const totalTasks = team.tasks.length;
+    const completedTasks = team.tasks.filter((t) => t.status === "completed").length;
+
+    embed.addFields({
+      name: team.teamName,
+      value: [
+        `Worker: **${team.workerId}**`,
+        `Members: ${memberNames || "none"}`,
+        `Tasks: ${completedTasks}/${totalTasks} completed (${runningTasks} running)`,
+      ].join("\n"),
+    });
+  }
+
+  embed.setFooter({ text: `Total: ${teams.length} team(s)` });
+
+  return embed;
 }

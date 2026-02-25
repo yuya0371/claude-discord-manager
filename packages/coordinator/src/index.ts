@@ -6,6 +6,7 @@ import { WsServer, WsServerConfig } from "./ws/server.js";
 import { TaskQueue } from "./task/queue.js";
 import { TaskManager } from "./task/manager.js";
 import { WorkerRegistry } from "./worker/registry.js";
+import { ProjectAliasManager } from "./project/aliases.js";
 
 // ルートの .env を明示的に読み込む
 function findEnvFile(): string {
@@ -60,6 +61,10 @@ class CoordinatorApp {
     this.wsServer = new WsServer(wsConfig, this.workerRegistry, this.taskManager);
     await this.wsServer.start();
 
+    // Project Alias Manager 初期化
+    const aliasFilePath = path.join(process.cwd(), "data", "aliases.json");
+    const aliasManager = new ProjectAliasManager(aliasFilePath);
+
     // Discord Bot 起動
     const botConfig: DiscordBotConfig = {
       token: env.discordToken,
@@ -67,11 +72,13 @@ class CoordinatorApp {
       allowedUserIds: env.allowedUserIds,
       statusChannelId: env.channelStatus,
       workersChannelId: env.channelWorkers,
+      tokenUsageChannelId: env.channelTokenUsage,
     };
     this.discordBot = new DiscordBot(
       botConfig,
       this.taskManager,
-      this.workerRegistry
+      this.workerRegistry,
+      aliasManager
     );
     await this.discordBot.start();
 
@@ -120,6 +127,9 @@ class CoordinatorApp {
     if (!coordinatorSecret)
       throw new Error("COORDINATOR_SECRET is required");
 
+    // オプショナル: #token-usage チャンネル
+    const channelTokenUsage = process.env.CHANNEL_TOKEN_USAGE ?? undefined;
+
     return {
       discordToken,
       guildId,
@@ -128,6 +138,7 @@ class CoordinatorApp {
       channelWorkers,
       wsPort,
       coordinatorSecret,
+      channelTokenUsage,
     };
   }
 }
@@ -140,6 +151,7 @@ interface EnvConfig {
   channelWorkers: string;
   wsPort: number;
   coordinatorSecret: string;
+  channelTokenUsage?: string;
 }
 
 // --- Application entry point ---

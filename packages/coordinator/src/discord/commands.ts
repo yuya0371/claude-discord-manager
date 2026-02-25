@@ -8,12 +8,22 @@ import {
   PermissionMode,
   TaskStatus,
   FileAttachment,
+  TeamInfo,
   FILE_MAX_SIZE_BYTES,
 } from "@claude-discord/common";
 import { TaskManager, TaskCreateOptions } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
 import { ProjectAliasManager } from "../project/aliases.js";
-import { buildTaskEmbed, buildWorkersEmbed, buildHelpEmbed } from "./embeds.js";
+import { TokenTracker } from "../token/tracker.js";
+import {
+  buildTaskEmbed,
+  buildWorkersEmbed,
+  buildHelpEmbed,
+  buildTokenSummaryEmbed,
+  buildTokenDetailEmbed,
+  buildTokenWorkerEmbed,
+  buildTeamsListEmbed,
+} from "./embeds.js";
 
 /**
  * スラッシュコマンドの定義と登録
@@ -21,12 +31,16 @@ import { buildTaskEmbed, buildWorkersEmbed, buildHelpEmbed } from "./embeds.js";
 export class CommandHandler {
   private commands: SlashCommandBuilder[];
 
+  /** アクティブなチーム情報を取得するコールバック */
+  public teamsProvider: (() => TeamInfo[]) | null = null;
+
   constructor(
     private readonly taskManager: TaskManager,
     private readonly workerRegistry: WorkerRegistry,
     private readonly allowedUserIds: string[],
     private readonly statusChannelId: string,
-    private readonly aliasManager?: ProjectAliasManager
+    private readonly aliasManager?: ProjectAliasManager,
+    private readonly tokenTracker?: TokenTracker
   ) {
     this.commands = this.buildCommands();
   }
@@ -84,6 +98,12 @@ export class CommandHandler {
         break;
       case "alias":
         await this.handleAlias(interaction);
+        break;
+      case "token":
+        await this.handleToken(interaction);
+        break;
+      case "teams":
+        await this.handleTeams(interaction);
         break;
       default:
         await interaction.reply({
@@ -207,7 +227,26 @@ export class CommandHandler {
         sub.setName("list").setDescription("エイリアス一覧を表示する")
       ) as SlashCommandBuilder;
 
-    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd, aliasCmd];
+    const tokenCmd = new SlashCommandBuilder()
+      .setName("token")
+      .setDescription("トークン使用量を表示する")
+      .addStringOption((option) =>
+        option
+          .setName("view")
+          .setDescription("表示モード")
+          .setRequired(false)
+          .addChoices(
+            { name: "summary", value: "summary" },
+            { name: "detail", value: "detail" },
+            { name: "worker", value: "worker" }
+          )
+      ) as SlashCommandBuilder;
+
+    const teamsCmd = new SlashCommandBuilder()
+      .setName("teams")
+      .setDescription("アクティブなAgent Teamsの一覧を表示する");
+
+    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd, aliasCmd, tokenCmd, teamsCmd];
   }
 
   // --- Command handlers ---
@@ -431,6 +470,130 @@ export class CommandHandler {
         content: `Failed to cancel task "${taskId}".`,
         ephemeral: true,
       });
+    }
+  }
+
+  private async handleAlias(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
+    if (!this.aliasManager) {
+      await interaction.reply({
+        content: "Alias feature is not enabled.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const subcommand = interaction.options.getSubcommand();
+
+    switch (subcommand) {
+      case "add": {
+        const name = interaction.options.getString("name", true);
+        const aliasPath = interaction.options.getString("path", true);
+        const worker = interaction.options.getString("worker");
+
+        const entry = this.aliasManager.add(name, aliasPath, worker);
+        const workerNote = entry.preferredWorker
+          ? ` (preferred worker: ${entry.preferredWorker})`
+          : "";
+        await interaction.reply({
+          content: `Alias added: @${entry.alias} -> ${entry.path}${workerNote}`,
+          ephemeral: true,
+        });
+        break;
+      }
+
+      case "remove": {
+        const name = interaction.options.getString("name", true);
+        const removed = this.aliasManager.remove(name);
+        if (removed) {
+          await interaction.reply({
+            content: `Alias "@${name}" removed.`,
+            ephemeral: true,
+          });
+        } else {
+          await interaction.reply({
+            content: `Alias "@${name}" not found.`,
+            ephemeral: true,
+          });
+        }
+        break;
+      }
+
+      case "list": {
+        const aliases = this.aliasManager.getAll();
+        if (aliases.length === 0) {
+          await interaction.reply({
+            content: "No aliases configured.",
+            ephemeral: true,
+          });
+        } else {
+          const lines = aliases.map((a) => {
+            const worker = a.preferredWorker
+              ? ` (worker: ${a.preferredWorker})`
+              : "";
+            return `- @${a.alias} -> ${a.path}${worker}`;
+          });
+          await interaction.reply({
+            content: `**Aliases:**\n${lines.join("\n")}`,
+            ephemeral: true,
+          });
+        }
+        break;
+      }
+
+      default:
+        await interaction.reply({
+          content: `Unknown subcommand: ${subcommand}`,
+          ephemeral: true,
+        });
+    }
+  }
+
+  private async handleTeams(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
+    const teams = this.teamsProvider ? this.teamsProvider() : [];
+    const embed = buildTeamsListEmbed(teams);
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  private async handleToken(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
+    if (!this.tokenTracker) {
+      await interaction.reply({
+        content: "Token tracking is not enabled.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const view = interaction.options.getString("view") ?? "summary";
+
+    switch (view) {
+      case "detail": {
+        const records = this.tokenTracker.getTaskDetails();
+        const embed = buildTokenDetailEmbed(records);
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+        break;
+      }
+
+      case "worker": {
+        const workerSummaries = this.tokenTracker.getWorkerSummaries();
+        const embed = buildTokenWorkerEmbed(workerSummaries);
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+        break;
+      }
+
+      case "summary":
+      default: {
+        const todaySummary = this.tokenTracker.getTodaySummary();
+        const cumulativeSummary = this.tokenTracker.getCumulativeSummary();
+        const embed = buildTokenSummaryEmbed(todaySummary, cumulativeSummary);
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+        break;
+      }
     }
   }
 }
