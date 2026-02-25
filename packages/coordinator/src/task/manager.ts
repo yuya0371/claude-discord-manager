@@ -121,72 +121,86 @@ export class TaskManager {
 
   /**
    * キューからタスクを取り出してWorkerに割り当てる
+   * ワーカー指定ありのタスクは指定ワーカーがOnlineになるまで待機し、
+   * 指定なしタスクはラウンドロビンで割り当てる。
    */
   async dispatchNext(): Promise<void> {
     if (this.queue.isEmpty()) return;
 
-    const taskId = this.queue.getAll()[0];
-    if (!taskId) return;
+    const queuedTaskIds = this.queue.getAll();
 
-    const task = this.tasks.get(taskId);
-    if (!task) {
-      this.queue.dequeue();
+    for (const taskId of queuedTaskIds) {
+      const task = this.tasks.get(taskId);
+      if (!task) {
+        this.queue.remove(taskId);
+        continue;
+      }
+
+      // 利用可能なWorkerを探す
+      let worker;
+      if (task.workerId) {
+        // ワーカー指定ありの場合、そのワーカーがOnlineの場合のみディスパッチ
+        // Busy/Offlineの場合はスキップしてキューに残す（別ワーカーには送らない）
+        const preferred = this.workerRegistry.getWorker(task.workerId);
+        worker = (preferred && preferred.status === WorkerStatus.Online) ? preferred : null;
+      } else {
+        // ワーカー指定なしの場合、ラウンドロビンで選択
+        worker = this.workerRegistry.getAvailableWorker();
+      }
+
+      if (!worker) continue;
+
+      // キューから取り出す
+      this.queue.remove(taskId);
+
+      // タスクをrunning状態に更新
+      task.status = TaskStatus.Running;
+      task.workerId = worker.id;
+      task.startedAt = Date.now();
+
+      // Worker状態をbusyに
+      this.workerRegistry.setWorkerStatus(worker.id, WorkerStatus.Busy);
+      this.workerRegistry.setWorkerCurrentTask(worker.id, taskId);
+
+      // 添付ファイルがある場合、ダウンロード→Worker転送
+      if (task.attachments.length > 0) {
+        try {
+          await this.transferAttachments(task, worker.id);
+        } catch (err) {
+          console.error(`Failed to transfer attachments for ${taskId}:`, err);
+          // 転送失敗でもタスクは実行する（添付なしで）
+        }
+      }
+
+      // タスク割り当てメッセージを送信
+      const assignMsg = createMessage<TaskAssignPayload>(
+        "task:assign",
+        {
+          taskId: task.id,
+          prompt: task.prompt,
+          cwd: task.cwd,
+          permissionMode: task.permissionMode,
+          teamMode: task.teamMode,
+          continueSession: task.continueSession,
+          sessionId: task.sessionId,
+          attachments: task.attachments,
+        },
+        { taskId: task.id, workerId: worker.id }
+      );
+
+      this.workerRegistry.sendToWorker(worker.id, assignMsg);
+
+      // タイムアウトタイマー設定
+      this.setTaskTimeout(taskId);
+
+      // コールバック
+      if (this.callbacks?.onTaskStarted) {
+        await this.callbacks.onTaskStarted(task);
+      }
+
+      console.log(`Task ${taskId} assigned to worker "${worker.id}"`);
       return;
     }
-
-    // 利用可能なWorkerを探す（タスクに指定ワーカーがあれば優先）
-    const worker = this.workerRegistry.getAvailableWorker(task.workerId);
-    if (!worker) return;
-
-    // キューから取り出す
-    this.queue.dequeue();
-
-    // タスクをrunning状態に更新
-    task.status = TaskStatus.Running;
-    task.workerId = worker.id;
-    task.startedAt = Date.now();
-
-    // Worker状態をbusyに
-    this.workerRegistry.setWorkerStatus(worker.id, WorkerStatus.Busy);
-    this.workerRegistry.setWorkerCurrentTask(worker.id, taskId);
-
-    // 添付ファイルがある場合、ダウンロード→Worker転送
-    if (task.attachments.length > 0) {
-      try {
-        await this.transferAttachments(task, worker.id);
-      } catch (err) {
-        console.error(`Failed to transfer attachments for ${taskId}:`, err);
-        // 転送失敗でもタスクは実行する（添付なしで）
-      }
-    }
-
-    // タスク割り当てメッセージを送信
-    const assignMsg = createMessage<TaskAssignPayload>(
-      "task:assign",
-      {
-        taskId: task.id,
-        prompt: task.prompt,
-        cwd: task.cwd,
-        permissionMode: task.permissionMode,
-        teamMode: task.teamMode,
-        continueSession: task.continueSession,
-        sessionId: task.sessionId,
-        attachments: task.attachments,
-      },
-      { taskId: task.id, workerId: worker.id }
-    );
-
-    this.workerRegistry.sendToWorker(worker.id, assignMsg);
-
-    // タイムアウトタイマー設定
-    this.setTaskTimeout(taskId);
-
-    // コールバック
-    if (this.callbacks?.onTaskStarted) {
-      await this.callbacks.onTaskStarted(task);
-    }
-
-    console.log(`Task ${taskId} assigned to worker "${worker.id}"`);
   }
 
   /**
