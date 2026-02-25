@@ -19,7 +19,12 @@
     "test:watch": "vitest",
     "test:common": "vitest run --project common",
     "lint": "eslint packages/*/src/**/*.ts",
-    "clean": "rm -rf packages/*/dist"
+    "clean": "rm -rf packages/*/dist",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart ecosystem.config.cjs",
+    "pm2:logs": "pm2 logs",
+    "pm2:status": "pm2 status"
   },
   "engines": {
     "node": ">=18.0.0"
