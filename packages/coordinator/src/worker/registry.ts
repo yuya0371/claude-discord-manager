@@ -28,6 +28,11 @@ export class WorkerRegistry {
   /** 優先Worker設定 (userId -> workerId) */
   private preferredWorkers: Map<string, string> = new Map();
 
+  /** Worker接続時のコールバック */
+  public onWorkerConnected:
+    | ((worker: WorkerInfo) => void)
+    | null = null;
+
   /** Worker切断時のコールバック */
   public onWorkerDisconnected:
     | ((workerId: string, hadRunningTask: boolean) => void)
@@ -103,6 +108,11 @@ export class WorkerRegistry {
     ws.send(JSON.stringify(ack));
 
     console.log(`Worker "${workerId}" registered successfully`);
+
+    if (this.onWorkerConnected) {
+      this.onWorkerConnected(workerInfo);
+    }
+
     return true;
   }
 

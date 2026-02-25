@@ -1,12 +1,9 @@
 // packages/worker/src/index.ts
 
 import dotenv from "dotenv";
-import { fileURLToPath } from "node:url";
-
-// ルートの .env を明示的に読み込む
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
-
+import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import {
   type WsMessage,
   type TaskAssignPayload,
@@ -21,13 +18,27 @@ import {
   type TokenUsage,
   WorkerStatus,
   PermissionMode,
+  TASK_DEFAULT_TIMEOUT_MS,
 } from "@claude-discord/common";
 import { WsClient } from "./ws/client.js";
 import { ClaudeExecutor, type ExecuteOptions } from "./claude/executor.js";
 import type { ParsedEvent } from "./claude/parser.js";
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
+
+// ─── .env 読み込み ───
+// npm workspaces 経由で起動した場合 cwd はモノレポルート
+// 直接起動した場合にも対応するため、.env を探索する
+function findEnvFile(): string {
+  let dir = process.cwd();
+  for (let i = 0; i < 5; i++) {
+    const candidate = path.join(dir, ".env");
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.join(process.cwd(), ".env");
+}
+dotenv.config({ path: findEnvFile() });
 
 // ─── 設定読み込み ───
 
@@ -43,11 +54,17 @@ if (!COORDINATOR_SECRET) {
 
 // ─── WorkerApp ───
 
+// 許可ディレクトリ (.env の ALLOWED_DIRS をカンマ区切りで指定、未設定なら DEFAULT_CWD)
+const ALLOWED_DIRS = process.env.ALLOWED_DIRS
+  ? process.env.ALLOWED_DIRS.split(",").map((d) => d.trim())
+  : [DEFAULT_CWD];
+
 class WorkerApp {
   private readonly wsClient: WsClient;
   private readonly executor = new ClaudeExecutor();
   private currentTaskId: string | null = null;
   private taskStartTime = 0;
+  private taskTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private accumulatedTokens: TokenUsage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -64,6 +81,7 @@ class WorkerApp {
       secret: COORDINATOR_SECRET,
       workerName: WORKER_NAME,
       defaultCwd: DEFAULT_CWD,
+      allowedDirs: ALLOWED_DIRS,
     });
 
     this.setupWsHandlers();
@@ -81,6 +99,8 @@ class WorkerApp {
   /** Worker をシャットダウンする */
   async shutdown(): Promise<void> {
     console.log("[Worker] Shutting down...");
+
+    this.clearTaskTimeout();
 
     // 実行中タスクがあればキャンセル
     if (this.executor.running) {
@@ -146,6 +166,25 @@ class WorkerApp {
       return;
     }
 
+    const cwd = payload.cwd ?? DEFAULT_CWD;
+
+    // 許可ディレクトリチェック
+    const resolvedCwd = path.resolve(cwd);
+    const isAllowed = ALLOWED_DIRS.some((dir) =>
+      resolvedCwd.startsWith(path.resolve(dir))
+    );
+    if (!isAllowed) {
+      console.error(`[Worker] CWD "${resolvedCwd}" is not in allowed directories: ${ALLOWED_DIRS.join(", ")}`);
+      const errorPayload: TaskErrorPayload = {
+        message: `Directory "${resolvedCwd}" is not in the worker's allowed directories`,
+        code: "DIRECTORY_NOT_ALLOWED",
+        partialResult: null,
+        tokenUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      };
+      this.wsClient.send("task:error", errorPayload, payload.taskId);
+      return;
+    }
+
     console.log(`[Worker] Assigned task: ${payload.taskId}`);
     this.currentTaskId = payload.taskId;
     this.taskStartTime = Date.now();
@@ -156,10 +195,12 @@ class WorkerApp {
 
     this.wsClient.setStatus(WorkerStatus.Busy, payload.taskId);
 
-    const cwd = payload.cwd ?? DEFAULT_CWD;
+    // タスクタイムアウトタイマーを設定
+    this.startTaskTimeout(payload.taskId);
+
     const options: ExecuteOptions = {
       prompt: payload.prompt,
-      cwd,
+      cwd: resolvedCwd,
       permissionMode: payload.permissionMode ?? PermissionMode.AcceptEdits,
       teamMode: payload.teamMode ?? false,
       sessionId: payload.continueSession ? payload.sessionId : null,
@@ -169,6 +210,37 @@ class WorkerApp {
     };
 
     this.executor.execute(options);
+  }
+
+  /** タスクタイムアウトタイマーを設定する */
+  private startTaskTimeout(taskId: string): void {
+    this.clearTaskTimeout();
+    this.taskTimeoutTimer = setTimeout(async () => {
+      if (this.currentTaskId === taskId && this.executor.running) {
+        console.warn(`[Worker] Task ${taskId} timed out after ${TASK_DEFAULT_TIMEOUT_MS}ms`);
+        await this.executor.kill();
+        // exit イベントで task:error が送られるが、明示的にタイムアウトエラーを送信
+        if (this.currentTaskId === taskId) {
+          const errorPayload: TaskErrorPayload = {
+            message: `Task timed out after ${Math.round(TASK_DEFAULT_TIMEOUT_MS / 1000)}s`,
+            code: "TIMEOUT",
+            partialResult: this.lastResultText || null,
+            tokenUsage: { ...this.accumulatedTokens },
+          };
+          this.wsClient.send("task:error", errorPayload, taskId);
+          this.currentTaskId = null;
+          this.wsClient.setStatus(WorkerStatus.Online, null);
+        }
+      }
+    }, TASK_DEFAULT_TIMEOUT_MS);
+  }
+
+  /** タスクタイムアウトタイマーをクリアする */
+  private clearTaskTimeout(): void {
+    if (this.taskTimeoutTimer) {
+      clearTimeout(this.taskTimeoutTimer);
+      this.taskTimeoutTimer = null;
+    }
   }
 
   /** タスクキャンセルハンドラ */
@@ -277,6 +349,7 @@ class WorkerApp {
 
   /** プロセス正常/異常終了 */
   private handleProcessExit(code: number | null, signal: string | null): void {
+    this.clearTaskTimeout();
     if (!this.currentTaskId) return;
 
     const durationMs = Date.now() - this.taskStartTime;
@@ -310,6 +383,7 @@ class WorkerApp {
 
   /** プロセス起動エラー */
   private handleProcessError(error: Error): void {
+    this.clearTaskTimeout();
     if (!this.currentTaskId) return;
 
     const taskId = this.currentTaskId;

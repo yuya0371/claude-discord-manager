@@ -7,6 +7,8 @@ import {
   TaskStreamPayload,
   TaskCompletePayload,
   TaskErrorPayload,
+  TaskQuestionPayload,
+  TaskPermissionPayload,
   parseMessage,
 } from "@claude-discord/common";
 import { WorkerRegistry } from "../worker/registry.js";
@@ -176,6 +178,24 @@ export class WsServer {
           await this.taskManager.handleTaskError(
             msg.taskId,
             msg.payload as TaskErrorPayload
+          );
+        }
+        break;
+
+      case "task:question":
+        if (msg.taskId) {
+          await this.taskManager.handleTaskQuestion(
+            msg.taskId,
+            msg.payload as TaskQuestionPayload
+          );
+        }
+        break;
+
+      case "task:permission":
+        if (msg.taskId) {
+          await this.taskManager.handleTaskPermission(
+            msg.taskId,
+            msg.payload as TaskPermissionPayload
           );
         }
         break;

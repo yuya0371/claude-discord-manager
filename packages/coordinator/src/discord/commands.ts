@@ -7,7 +7,7 @@ import {
 import { PermissionMode, TaskStatus } from "@claude-discord/common";
 import { TaskManager, TaskCreateOptions } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
-import { buildTaskEmbed, buildWorkersEmbed } from "./embeds.js";
+import { buildTaskEmbed, buildWorkersEmbed, buildHelpEmbed } from "./embeds.js";
 
 /**
  * スラッシュコマンドの定義と登録
@@ -71,6 +71,9 @@ export class CommandHandler {
         break;
       case "cancel":
         await this.handleCancel(interaction);
+        break;
+      case "help":
+        await this.handleHelp(interaction);
         break;
       default:
         await interaction.reply({
@@ -152,7 +155,11 @@ export class CommandHandler {
           .setRequired(true)
       ) as SlashCommandBuilder;
 
-    return [taskCmd, workersCmd, statusCmd, cancelCmd];
+    const helpCmd = new SlashCommandBuilder()
+      .setName("help")
+      .setDescription("利用可能なコマンドと使い方を表示する");
+
+    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd];
   }
 
   // --- Command handlers ---
@@ -283,6 +290,13 @@ export class CommandHandler {
         ephemeral: true,
       });
     }
+  }
+
+  private async handleHelp(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
+    const embed = buildHelpEmbed();
+    await interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
   private async handleCancel(

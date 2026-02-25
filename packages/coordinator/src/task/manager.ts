@@ -10,6 +10,8 @@ import {
   TaskCompletePayload,
   TaskErrorPayload,
   TaskCancelPayload,
+  TaskQuestionPayload,
+  TaskPermissionPayload,
   createMessage,
   TASK_DEFAULT_TIMEOUT_MS,
   DISCORD_STATUS_UPDATE_INTERVAL_MS,
@@ -38,6 +40,8 @@ export interface TaskEventCallbacks {
   onTaskCompleted: (task: Task) => Promise<void>;
   onTaskFailed: (task: Task) => Promise<void>;
   onTaskCancelled: (task: Task) => Promise<void>;
+  onTaskQuestion: (taskId: string, payload: TaskQuestionPayload) => Promise<void>;
+  onTaskPermission: (taskId: string, payload: TaskPermissionPayload) => Promise<void>;
 }
 
 export class TaskManager {
@@ -417,6 +421,36 @@ export class TaskManager {
    */
   getRunningTasks(): Task[] {
     return this.getAllTasks().filter((t) => t.status === TaskStatus.Running);
+  }
+
+  /**
+   * Worker からの質問を処理
+   */
+  async handleTaskQuestion(
+    taskId: string,
+    payload: TaskQuestionPayload
+  ): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== TaskStatus.Running) return;
+
+    if (this.callbacks?.onTaskQuestion) {
+      await this.callbacks.onTaskQuestion(taskId, payload);
+    }
+  }
+
+  /**
+   * Worker からの権限確認を処理
+   */
+  async handleTaskPermission(
+    taskId: string,
+    payload: TaskPermissionPayload
+  ): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== TaskStatus.Running) return;
+
+    if (this.callbacks?.onTaskPermission) {
+      await this.callbacks.onTaskPermission(taskId, payload);
+    }
   }
 
   /**

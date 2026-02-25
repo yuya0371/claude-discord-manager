@@ -1,9 +1,25 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+import path from "node:path";
+import fs from "node:fs";
 import { DiscordBot, DiscordBotConfig } from "./discord/bot.js";
 import { WsServer, WsServerConfig } from "./ws/server.js";
 import { TaskQueue } from "./task/queue.js";
 import { TaskManager } from "./task/manager.js";
 import { WorkerRegistry } from "./worker/registry.js";
+
+// ルートの .env を明示的に読み込む
+function findEnvFile(): string {
+  let dir = process.cwd();
+  for (let i = 0; i < 5; i++) {
+    const candidate = path.join(dir, ".env");
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.join(process.cwd(), ".env");
+}
+dotenv.config({ path: findEnvFile() });
 
 /**
  * Coordinator Bot アプリケーション全体の起動・シャットダウン制御
@@ -50,6 +66,7 @@ class CoordinatorApp {
       guildId: env.guildId,
       allowedUserIds: env.allowedUserIds,
       statusChannelId: env.channelStatus,
+      workersChannelId: env.channelWorkers,
     };
     this.discordBot = new DiscordBot(
       botConfig,
@@ -94,6 +111,9 @@ class CoordinatorApp {
     const channelStatus = process.env.CHANNEL_STATUS;
     if (!channelStatus) throw new Error("CHANNEL_STATUS is required");
 
+    const channelWorkers = process.env.CHANNEL_WORKERS;
+    if (!channelWorkers) throw new Error("CHANNEL_WORKERS is required");
+
     const wsPort = parseInt(process.env.WS_PORT ?? "8765", 10);
 
     const coordinatorSecret = process.env.COORDINATOR_SECRET;
@@ -105,6 +125,7 @@ class CoordinatorApp {
       guildId,
       allowedUserIds,
       channelStatus,
+      channelWorkers,
       wsPort,
       coordinatorSecret,
     };
@@ -116,6 +137,7 @@ interface EnvConfig {
   guildId: string;
   allowedUserIds: string[];
   channelStatus: string;
+  channelWorkers: string;
   wsPort: number;
   coordinatorSecret: string;
 }

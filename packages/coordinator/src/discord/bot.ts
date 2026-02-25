@@ -5,16 +5,27 @@ import {
   TextChannel,
   Events,
 } from "discord.js";
-import { Task } from "@claude-discord/common";
+import {
+  Task,
+  TaskQuestionPayload,
+  TaskPermissionPayload,
+} from "@claude-discord/common";
 import { CommandHandler } from "./commands.js";
-import { buildTaskEmbed } from "./embeds.js";
+import { ButtonHandler } from "./buttons.js";
+import {
+  buildTaskEmbed,
+  buildWorkerConnectedEmbed,
+  buildWorkerDisconnectedEmbed,
+} from "./embeds.js";
 import { TaskManager } from "../task/manager.js";
+import { WorkerRegistry } from "../worker/registry.js";
 
 export interface DiscordBotConfig {
   token: string;
   guildId: string;
   allowedUserIds: string[];
   statusChannelId: string;
+  workersChannelId: string;
 }
 
 /**
@@ -23,14 +34,17 @@ export interface DiscordBotConfig {
 export class DiscordBot {
   private client: Client;
   private commandHandler: CommandHandler | null = null;
+  private buttonHandler: ButtonHandler | null = null;
   private statusChannelId: string;
+  private workersChannelId: string;
 
   constructor(
     private readonly config: DiscordBotConfig,
     private readonly taskManager: TaskManager,
-    private readonly workerRegistry: import("../worker/registry.js").WorkerRegistry
+    private readonly workerRegistry: WorkerRegistry
   ) {
     this.statusChannelId = config.statusChannelId;
+    this.workersChannelId = config.workersChannelId;
 
     this.client = new Client({
       intents: [
@@ -52,6 +66,14 @@ export class DiscordBot {
       this.statusChannelId
     );
 
+    // ボタンハンドラ初期化
+    this.buttonHandler = new ButtonHandler(
+      this.taskManager,
+      this.workerRegistry,
+      this.config.allowedUserIds,
+      this.statusChannelId
+    );
+
     // ready イベント
     this.client.once(Events.ClientReady, async (readyClient) => {
       console.log(`Discord Bot logged in as ${readyClient.user.tag}`);
@@ -65,32 +87,41 @@ export class DiscordBot {
 
     // interactionCreate イベント
     this.client.on(Events.InteractionCreate, async (interaction) => {
-      if (!interaction.isChatInputCommand()) return;
-
       try {
-        await this.commandHandler!.handleInteraction(interaction);
+        if (interaction.isChatInputCommand()) {
+          await this.commandHandler!.handleInteraction(interaction);
+        } else if (interaction.isButton()) {
+          await this.buttonHandler!.handleButton(interaction);
+        } else if (interaction.isModalSubmit()) {
+          await this.buttonHandler!.handleModalSubmit(interaction);
+        }
       } catch (error) {
         console.error("Error handling interaction:", error);
-        if (interaction.replied || interaction.deferred) {
-          await interaction
-            .followUp({
-              content: "An error occurred while processing the command.",
-              ephemeral: true,
-            })
-            .catch(console.error);
-        } else {
-          await interaction
-            .reply({
-              content: "An error occurred while processing the command.",
-              ephemeral: true,
-            })
-            .catch(console.error);
+        if (interaction.isRepliable()) {
+          if (interaction.replied || interaction.deferred) {
+            await interaction
+              .followUp({
+                content: "An error occurred while processing the interaction.",
+                ephemeral: true,
+              })
+              .catch(console.error);
+          } else {
+            await interaction
+              .reply({
+                content: "An error occurred while processing the interaction.",
+                ephemeral: true,
+              })
+              .catch(console.error);
+          }
         }
       }
     });
 
     // タスクイベントコールバックを設定
     this.setupTaskCallbacks();
+
+    // Worker接続/切断コールバックを設定
+    this.setupWorkerCallbacks();
 
     // Botにログイン
     await this.client.login(this.config.token);
@@ -134,6 +165,26 @@ export class DiscordBot {
       onTaskCancelled: async (task) => {
         await this.updateTaskEmbed(task);
       },
+      onTaskQuestion: async (taskId, payload) => {
+        const channel = this.client.channels.cache.get(this.statusChannelId);
+        if (channel && channel.isTextBased() && "send" in channel) {
+          await this.buttonHandler!.postQuestionMessage(
+            channel as TextChannel,
+            taskId,
+            payload
+          );
+        }
+      },
+      onTaskPermission: async (taskId, payload) => {
+        const channel = this.client.channels.cache.get(this.statusChannelId);
+        if (channel && channel.isTextBased() && "send" in channel) {
+          await this.buttonHandler!.postPermissionMessage(
+            channel as TextChannel,
+            taskId,
+            payload
+          );
+        }
+      },
     };
   }
 
@@ -157,6 +208,58 @@ export class DiscordBot {
       await message.edit({ embeds: [embed] });
     } catch (error) {
       console.error(`Failed to update task embed for ${task.id}:`, error);
+    }
+  }
+
+  /**
+   * Worker接続/切断コールバックをセットアップ
+   */
+  private setupWorkerCallbacks(): void {
+    const existingDisconnectCb = this.workerRegistry.onWorkerDisconnected;
+
+    this.workerRegistry.onWorkerConnected = (worker) => {
+      this.postWorkerConnectedNotification(worker).catch(console.error);
+    };
+
+    this.workerRegistry.onWorkerDisconnected = (workerId, hadRunningTask) => {
+      this.postWorkerDisconnectedNotification(workerId).catch(console.error);
+      if (existingDisconnectCb) {
+        existingDisconnectCb(workerId, hadRunningTask);
+      }
+    };
+  }
+
+  /**
+   * #workers チャンネルに Worker 接続通知を投稿
+   */
+  private async postWorkerConnectedNotification(
+    worker: import("@claude-discord/common").WorkerInfo
+  ): Promise<void> {
+    try {
+      const channel = this.client.channels.cache.get(this.workersChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const embed = buildWorkerConnectedEmbed(worker);
+      await (channel as TextChannel).send({ embeds: [embed] });
+    } catch (error) {
+      console.error("Failed to post worker connected notification:", error);
+    }
+  }
+
+  /**
+   * #workers チャンネルに Worker 切断通知を投稿
+   */
+  private async postWorkerDisconnectedNotification(
+    workerName: string
+  ): Promise<void> {
+    try {
+      const channel = this.client.channels.cache.get(this.workersChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      const embed = buildWorkerDisconnectedEmbed(workerName, "Connection lost");
+      await (channel as TextChannel).send({ embeds: [embed] });
+    } catch (error) {
+      console.error("Failed to post worker disconnected notification:", error);
     }
   }
 }

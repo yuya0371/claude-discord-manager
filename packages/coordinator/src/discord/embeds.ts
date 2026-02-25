@@ -167,6 +167,91 @@ export function buildWorkersEmbed(workers: WorkerInfo[]): EmbedBuilder {
 }
 
 /**
+ * Worker接続通知のEmbed生成
+ */
+export function buildWorkerConnectedEmbed(worker: WorkerInfo): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(Colors.Green)
+    .setTitle(`[Connected] ${worker.name}`)
+    .addFields(
+      { name: "OS", value: worker.os, inline: true },
+      { name: "Node.js", value: worker.nodeVersion, inline: true },
+      { name: "Claude CLI", value: worker.claudeCliVersion, inline: true },
+      { name: "Default CWD", value: worker.defaultCwd }
+    )
+    .setTimestamp();
+}
+
+/**
+ * Worker切断通知のEmbed生成
+ */
+export function buildWorkerDisconnectedEmbed(
+  workerName: string,
+  reason: string
+): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(Colors.Red)
+    .setTitle(`[Disconnected] ${workerName}`)
+    .addFields({ name: "Reason", value: reason })
+    .setTimestamp();
+}
+
+/**
+ * /help コマンドのEmbed生成
+ */
+export function buildHelpEmbed(): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(Colors.Blurple)
+    .setTitle("Claude Code Discord Manager - Help")
+    .setDescription("Discord から Claude Code CLI をリモート操作するBotです。")
+    .addFields(
+      {
+        name: "/task",
+        value: [
+          "Claudeにタスクを依頼します。",
+          "`prompt` (必須): プロンプト",
+          "`worker`: 実行先Worker名",
+          "`directory`: 作業ディレクトリ",
+          "`mode`: 権限モード (acceptEdits / auto / confirm)",
+          "`team`: Agent Teamsモードで実行",
+          "`continue`: 前回セッションを継続",
+        ].join("\n"),
+      },
+      {
+        name: "/workers",
+        value: "接続中のWorker一覧と状態を表示します。",
+      },
+      {
+        name: "/status",
+        value: [
+          "タスクの状態を表示します。",
+          "`task_id`: 特定タスクの詳細を表示（省略時は一覧）",
+        ].join("\n"),
+      },
+      {
+        name: "/cancel",
+        value: [
+          "実行中またはキュー内のタスクをキャンセルします。",
+          "`task_id` (必須): キャンセルするタスクID",
+        ].join("\n"),
+      },
+      {
+        name: "/help",
+        value: "このヘルプメッセージを表示します。",
+      },
+      {
+        name: "権限モード",
+        value: [
+          "**acceptEdits** (default): ファイル編集は自動許可、Bash実行はDiscordで確認",
+          "**auto**: 全操作を自動許可",
+          "**confirm**: 全操作をDiscordで確認",
+        ].join("\n"),
+      }
+    )
+    .setTimestamp();
+}
+
+/**
  * テキストを指定長に切り詰め
  */
 function truncateText(text: string, maxLen: number): string {
