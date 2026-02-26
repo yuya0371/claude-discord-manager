@@ -442,8 +442,8 @@ export class DiscordBot {
       // タスクにスレッドIDを記録
       this.taskManager.setDiscordThreadId(task.id, thread.id);
 
-      // 全文を分割して投稿
-      const chunks = splitTextForDiscord(task.resultText);
+      // 全文を分割して投稿（ヘッダー分の余裕を確保）
+      const chunks = splitTextForDiscord(task.resultText, 20);
       for (let i = 0; i < chunks.length; i++) {
         const header =
           chunks.length > 1 ? `**[${i + 1}/${chunks.length}]**\n` : "";
@@ -760,7 +760,7 @@ export class DiscordBot {
         const thread = await msg.startThread({
           name: `${jobName} - ${task.id} Full Output`,
         });
-        const chunks = splitTextForDiscord(fullText);
+        const chunks = splitTextForDiscord(fullText, 20);
         for (let i = 0; i < chunks.length; i++) {
           const header =
             chunks.length > 1 ? `**[${i + 1}/${chunks.length}]**\n` : "";

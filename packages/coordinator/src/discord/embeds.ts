@@ -468,8 +468,8 @@ export function isLongResult(text: string | null): boolean {
  * 長文テキストをDiscordメッセージの最大長に合わせて分割する
  * コードブロック内で分割されないよう考慮する
  */
-export function splitTextForDiscord(text: string): string[] {
-  const maxLen = DISCORD_MESSAGE_MAX_LENGTH;
+export function splitTextForDiscord(text: string, reservedLength = 0): string[] {
+  const maxLen = DISCORD_MESSAGE_MAX_LENGTH - reservedLength;
   if (text.length <= maxLen) return [text];
 
   const chunks: string[] = [];
