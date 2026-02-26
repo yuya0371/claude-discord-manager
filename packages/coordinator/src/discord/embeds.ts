@@ -7,6 +7,7 @@ import {
   WorkerInfo,
   WorkerStatus,
   TeamInfo,
+  ScheduleJob,
   DISCORD_EMBED_MAX_LENGTH,
   DISCORD_MESSAGE_MAX_LENGTH,
 } from "@claude-discord/common";
@@ -428,6 +429,18 @@ export function buildHelpEmbed(): EmbedBuilder {
         ].join("\n"),
       },
       {
+        name: "/schedule",
+        value: [
+          "定期タスクのスケジュール管理を行います。",
+          "`/schedule add name:<名前> cron:<cron式> prompt:<プロンプト> [worker:<Worker名>] [directory:<パス>]`",
+          "`/schedule remove name:<名前>`",
+          "`/schedule list`",
+          "`/schedule toggle name:<名前>` (有効/無効切替)",
+          "`/schedule run name:<名前>` (手動即時実行)",
+          "テンプレート変数: `{{date}}`, `{{datetime}}`, `{{weekday}}`",
+        ].join("\n"),
+      },
+      {
         name: "/help",
         value: "このヘルプメッセージを表示します。",
       },
@@ -769,6 +782,87 @@ export function buildTeamsListEmbed(teams: TeamInfo[]): EmbedBuilder {
   }
 
   embed.setFooter({ text: `Total: ${teams.length} team(s)` });
+
+  return embed;
+}
+
+// ─── Schedule Embeds ───
+
+/**
+ * スケジュール一覧のEmbed生成（/schedule list 用）
+ */
+export function buildScheduleListEmbed(jobs: ScheduleJob[]): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(Colors.Purple)
+    .setTitle("Scheduled Jobs")
+    .setTimestamp();
+
+  if (jobs.length === 0) {
+    embed.setDescription("No scheduled jobs.");
+    return embed;
+  }
+
+  for (const job of jobs) {
+    const enabledIcon = job.enabled ? "\u{1F7E2}" : "\u26AB";
+    const lastRun = job.lastRunAt
+      ? new Date(job.lastRunAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })
+      : "Never";
+    const workerInfo = job.workerId ? `Worker: ${job.workerId}` : "Worker: auto";
+    const cwdInfo = job.cwd ? `Dir: ${job.cwd}` : "";
+    const promptShort =
+      job.prompt.length > 80
+        ? job.prompt.substring(0, 80) + "..."
+        : job.prompt;
+
+    const lines = [
+      `Cron: \`${job.cronExpression}\``,
+      `${workerInfo}${cwdInfo ? ` | ${cwdInfo}` : ""}`,
+      `Last run: ${lastRun}`,
+      `Prompt: ${promptShort}`,
+    ];
+
+    embed.addFields({
+      name: `${enabledIcon} ${job.name} (${job.id})`,
+      value: lines.join("\n"),
+    });
+  }
+
+  const enabledCount = jobs.filter((j) => j.enabled).length;
+  embed.setFooter({
+    text: `Total: ${jobs.length} | Enabled: ${enabledCount}`,
+  });
+
+  return embed;
+}
+
+/**
+ * 定期タスク結果のEmbed生成（#scheduled チャンネル投稿用）
+ */
+export function buildScheduleResultEmbed(
+  jobName: string,
+  taskId: string,
+  resultText: string | null,
+  prompt: string
+): EmbedBuilder {
+  const promptDisplay =
+    prompt.length > 200 ? prompt.substring(0, 200) + "..." : prompt;
+
+  const embed = new EmbedBuilder()
+    .setColor(Colors.DarkGold)
+    .setTitle(`\uD83D\uDCC5 Scheduled: ${jobName}`)
+    .addFields(
+      { name: "Task", value: taskId, inline: true },
+      { name: "Prompt", value: promptDisplay }
+    )
+    .setTimestamp();
+
+  if (resultText) {
+    const resultDisplay =
+      resultText.length > 1024
+        ? resultText.substring(0, 1021) + "..."
+        : resultText;
+    embed.addFields({ name: "Result", value: resultDisplay });
+  }
 
   return embed;
 }

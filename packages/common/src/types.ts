@@ -105,6 +105,20 @@ export interface ProjectAlias {
   preferredWorker: string | null;
 }
 
+/** 定期タスク（スケジュールジョブ） */
+export interface ScheduleJob {
+  id: string;
+  name: string;
+  cronExpression: string;
+  prompt: string;
+  workerId: string | null;
+  cwd: string | null;
+  enabled: boolean;
+  lastRunAt: number | null;
+  lastTaskId: string | null;
+  createdBy: string;
+}
+
 /** Agent Teamsの情報 */
 export interface TeamInfo {
   teamName: string;

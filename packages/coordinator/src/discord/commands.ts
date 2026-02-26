@@ -17,6 +17,7 @@ import { WorkerRegistry } from "../worker/registry.js";
 import { ProjectAliasManager } from "../project/aliases.js";
 import { TokenTracker } from "../token/tracker.js";
 import { NotificationSettings } from "../notification/settings.js";
+import { ScheduleManager } from "../scheduler/manager.js";
 import {
   buildTaskEmbed,
   buildWorkersEmbed,
@@ -25,6 +26,7 @@ import {
   buildTokenDetailEmbed,
   buildTokenWorkerEmbed,
   buildTeamsListEmbed,
+  buildScheduleListEmbed,
 } from "./embeds.js";
 
 /**
@@ -35,6 +37,9 @@ export class CommandHandler {
 
   /** アクティブなチーム情報を取得するコールバック */
   public teamsProvider: (() => TeamInfo[]) | null = null;
+
+  /** スケジュールマネージャー */
+  public scheduleManager: ScheduleManager | null = null;
 
   constructor(
     private readonly taskManager: TaskManager,
@@ -77,6 +82,20 @@ export class CommandHandler {
       const input = focused.value.toLowerCase();
       const choices = workers
         .map((w) => ({ name: `${w.name} (${w.status})`, value: w.name }))
+        .filter((c) => c.value.toLowerCase().includes(input))
+        .slice(0, 25);
+      await interaction.respond(choices);
+    } else if (
+      focused.name === "name" &&
+      interaction.commandName === "schedule"
+    ) {
+      const jobs = this.scheduleManager?.getAll() ?? [];
+      const input = focused.value.toLowerCase();
+      const choices = jobs
+        .map((j) => ({
+          name: `${j.name} (${j.enabled ? "enabled" : "disabled"})`,
+          value: j.name,
+        }))
         .filter((c) => c.value.toLowerCase().includes(input))
         .slice(0, 25);
       await interaction.respond(choices);
@@ -127,6 +146,9 @@ export class CommandHandler {
         break;
       case "notify":
         await this.handleNotify(interaction);
+        break;
+      case "schedule":
+        await this.handleSchedule(interaction);
         break;
       default:
         await interaction.reply({
@@ -285,7 +307,77 @@ export class CommandHandler {
           )
       ) as SlashCommandBuilder;
 
-    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd, aliasCmd, tokenCmd, teamsCmd, notifyCmd];
+    const scheduleCmd = new SlashCommandBuilder()
+      .setName("schedule")
+      .setDescription("定期タスクのスケジュール管理")
+      .addSubcommand((sub) =>
+        sub
+          .setName("add")
+          .setDescription("スケジュールを追加する")
+          .addStringOption((opt) =>
+            opt.setName("name").setDescription("スケジュール名").setRequired(true)
+          )
+          .addStringOption((opt) =>
+            opt.setName("cron").setDescription("cron式（例: 0 8 * * *）").setRequired(true)
+          )
+          .addStringOption((opt) =>
+            opt.setName("prompt").setDescription("実行プロンプト（{{date}}等のテンプレート変数使用可）").setRequired(true)
+          )
+          .addStringOption((opt) =>
+            opt
+              .setName("worker")
+              .setDescription("実行先Worker名")
+              .setRequired(false)
+              .setAutocomplete(true)
+          )
+          .addStringOption((opt) =>
+            opt
+              .setName("directory")
+              .setDescription("作業ディレクトリ or エイリアス")
+              .setRequired(false)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("remove")
+          .setDescription("スケジュールを削除する")
+          .addStringOption((opt) =>
+            opt
+              .setName("name")
+              .setDescription("スケジュール名")
+              .setRequired(true)
+              .setAutocomplete(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub.setName("list").setDescription("スケジュール一覧を表示する")
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("toggle")
+          .setDescription("スケジュールの有効/無効を切り替える")
+          .addStringOption((opt) =>
+            opt
+              .setName("name")
+              .setDescription("スケジュール名")
+              .setRequired(true)
+              .setAutocomplete(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("run")
+          .setDescription("スケジュールを手動で即時実行する")
+          .addStringOption((opt) =>
+            opt
+              .setName("name")
+              .setDescription("スケジュール名")
+              .setRequired(true)
+              .setAutocomplete(true)
+          )
+      ) as SlashCommandBuilder;
+
+    return [taskCmd, workersCmd, statusCmd, cancelCmd, helpCmd, aliasCmd, tokenCmd, teamsCmd, notifyCmd, scheduleCmd];
   }
 
   // --- Command handlers ---
@@ -690,5 +782,129 @@ export class CommandHandler {
       content: `Notification level set to **${level}**. ${descriptions[level] ?? ""}`,
       ephemeral: true,
     });
+  }
+
+  private async handleSchedule(
+    interaction: ChatInputCommandInteraction
+  ): Promise<void> {
+    if (!this.scheduleManager) {
+      await interaction.reply({
+        content: "Schedule feature is not enabled.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const subcommand = interaction.options.getSubcommand();
+
+    switch (subcommand) {
+      case "add": {
+        const name = interaction.options.getString("name", true);
+        const cronExpr = interaction.options.getString("cron", true);
+        const prompt = interaction.options.getString("prompt", true);
+        const worker = interaction.options.getString("worker");
+        const directory = interaction.options.getString("directory");
+
+        // エイリアス解決
+        let resolvedCwd: string | null = directory;
+        if (directory && this.aliasManager) {
+          const resolved = this.aliasManager.resolve(directory);
+          if (resolved === null) {
+            await interaction.reply({
+              content: `Alias "${directory}" not found.`,
+              ephemeral: true,
+            });
+            return;
+          }
+          resolvedCwd = resolved.resolvedPath;
+        }
+
+        try {
+          const job = this.scheduleManager.addJob(
+            name,
+            cronExpr,
+            prompt,
+            interaction.user.id,
+            worker,
+            resolvedCwd
+          );
+          await interaction.reply({
+            content: `Schedule added: **${job.name}** (${job.cronExpression})\nID: ${job.id}`,
+            ephemeral: true,
+          });
+        } catch (err) {
+          await interaction.reply({
+            content: `Failed to add schedule: ${(err as Error).message}`,
+            ephemeral: true,
+          });
+        }
+        break;
+      }
+
+      case "remove": {
+        const name = interaction.options.getString("name", true);
+        const removed = this.scheduleManager.removeJob(name);
+        if (removed) {
+          await interaction.reply({
+            content: `Schedule "${name}" removed.`,
+            ephemeral: true,
+          });
+        } else {
+          await interaction.reply({
+            content: `Schedule "${name}" not found.`,
+            ephemeral: true,
+          });
+        }
+        break;
+      }
+
+      case "list": {
+        const jobs = this.scheduleManager.getAll();
+        const embed = buildScheduleListEmbed(jobs);
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+        break;
+      }
+
+      case "toggle": {
+        const name = interaction.options.getString("name", true);
+        const updated = this.scheduleManager.toggleJob(name);
+        if (updated) {
+          const status = updated.enabled ? "enabled" : "disabled";
+          await interaction.reply({
+            content: `Schedule "${name}" is now **${status}**.`,
+            ephemeral: true,
+          });
+        } else {
+          await interaction.reply({
+            content: `Schedule "${name}" not found.`,
+            ephemeral: true,
+          });
+        }
+        break;
+      }
+
+      case "run": {
+        const name = interaction.options.getString("name", true);
+        try {
+          const taskId = await this.scheduleManager.runNow(name);
+          await interaction.reply({
+            content: `Schedule "${name}" executed manually. Task: **${taskId}**`,
+            ephemeral: true,
+          });
+        } catch (err) {
+          await interaction.reply({
+            content: `Failed to run schedule: ${(err as Error).message}`,
+            ephemeral: true,
+          });
+        }
+        break;
+      }
+
+      default:
+        await interaction.reply({
+          content: `Unknown subcommand: ${subcommand}`,
+          ephemeral: true,
+        });
+    }
   }
 }

@@ -11,10 +11,12 @@
   "dependencies": {
     "@claude-discord/common": "*",
     "discord.js": "^14.16.0",
-    "ws": "^8.18.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "node-cron": "^4.2.1",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/node-cron": "^3.0.11",
     "@types/ws": "^8.5.0",
     "tsx": "^4.19.0"
   }

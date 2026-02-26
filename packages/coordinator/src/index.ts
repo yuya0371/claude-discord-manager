@@ -7,6 +7,8 @@ import { TaskQueue } from "./task/queue.js";
 import { TaskManager } from "./task/manager.js";
 import { WorkerRegistry } from "./worker/registry.js";
 import { ProjectAliasManager } from "./project/aliases.js";
+import { ScheduleStore } from "./scheduler/store.js";
+import { ScheduleManager } from "./scheduler/manager.js";
 
 // ルートの .env を明示的に読み込む
 function findEnvFile(): string {
@@ -30,6 +32,7 @@ class CoordinatorApp {
   private wsServer: WsServer | null = null;
   private taskManager: TaskManager | null = null;
   private workerRegistry: WorkerRegistry | null = null;
+  private scheduleManager: ScheduleManager | null = null;
 
   async start(): Promise<void> {
     console.log("Starting Coordinator Bot...");
@@ -65,6 +68,11 @@ class CoordinatorApp {
     const aliasFilePath = path.join(process.cwd(), "data", "aliases.json");
     const aliasManager = new ProjectAliasManager(aliasFilePath);
 
+    // Schedule Manager 初期化
+    const scheduleFilePath = path.join(process.cwd(), "data", "schedules.json");
+    const scheduleStore = new ScheduleStore(scheduleFilePath);
+    this.scheduleManager = new ScheduleManager(scheduleStore, this.taskManager);
+
     // Discord Bot 起動
     const botConfig: DiscordBotConfig = {
       token: env.discordToken,
@@ -74,6 +82,7 @@ class CoordinatorApp {
       workersChannelId: env.channelWorkers,
       tokenUsageChannelId: env.channelTokenUsage,
       teamsChannelId: env.channelTeams,
+      scheduledChannelId: env.channelScheduled,
     };
     this.discordBot = new DiscordBot(
       botConfig,
@@ -81,7 +90,14 @@ class CoordinatorApp {
       this.workerRegistry,
       aliasManager
     );
+
+    // ScheduleManager を DiscordBot に設定
+    this.discordBot.setScheduleManager(this.scheduleManager);
+
     await this.discordBot.start();
+
+    // スケジュールジョブを読み込んで cron 登録
+    this.scheduleManager.loadAll();
 
     // team:update メッセージのルーティングを設定
     this.wsServer.onTeamUpdate = async (workerId, payload) => {
@@ -96,6 +112,9 @@ class CoordinatorApp {
   async stop(): Promise<void> {
     console.log("Stopping Coordinator Bot...");
 
+    if (this.scheduleManager) {
+      this.scheduleManager.destroy();
+    }
     if (this.discordBot) {
       await this.discordBot.stop();
     }
@@ -141,6 +160,9 @@ class CoordinatorApp {
     // オプショナル: #teams チャンネル
     const channelTeams = process.env.CHANNEL_TEAMS ?? undefined;
 
+    // オプショナル: #scheduled チャンネル
+    const channelScheduled = process.env.CHANNEL_SCHEDULED ?? undefined;
+
     return {
       discordToken,
       guildId,
@@ -151,6 +173,7 @@ class CoordinatorApp {
       coordinatorSecret,
       channelTokenUsage,
       channelTeams,
+      channelScheduled,
     };
   }
 }
@@ -165,6 +188,7 @@ interface EnvConfig {
   coordinatorSecret: string;
   channelTokenUsage?: string;
   channelTeams?: string;
+  channelScheduled?: string;
 }
 
 // --- Application entry point ---

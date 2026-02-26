@@ -28,6 +28,7 @@ import {
   buildTokenUsageNotificationEmbed,
   buildTeamUpdateEmbed,
   buildTeamsListEmbed,
+  buildScheduleResultEmbed,
   isLongResult,
   splitTextForDiscord,
 } from "./embeds.js";
@@ -35,6 +36,7 @@ import { TaskManager } from "../task/manager.js";
 import { WorkerRegistry } from "../worker/registry.js";
 import { ProjectAliasManager } from "../project/aliases.js";
 import { TokenTracker } from "../token/tracker.js";
+import { ScheduleManager } from "../scheduler/manager.js";
 import {
   NotificationSettings,
   NotificationEventType,
@@ -107,6 +109,7 @@ export interface DiscordBotConfig {
   workersChannelId: string;
   tokenUsageChannelId?: string;
   teamsChannelId?: string;
+  scheduledChannelId?: string;
 }
 
 /**
@@ -120,6 +123,7 @@ export class DiscordBot {
   private workersChannelId: string;
   private tokenUsageChannelId: string | null;
   private teamsChannelId: string | null = null;
+  private scheduledChannelId: string | null = null;
 
   /** トークン使用量トラッカー */
   private tokenTracker: TokenTracker;
@@ -129,6 +133,9 @@ export class DiscordBot {
 
   /** アクティブなチーム情報のキャッシュ */
   private activeTeams: Map<string, TeamInfo> = new Map();
+
+  /** スケジュールマネージャー */
+  private scheduleManager: ScheduleManager | null = null;
 
   /** ピン留めステータスサマリーメッセージのID */
   private statusSummaryMessageId: string | null = null;
@@ -145,6 +152,7 @@ export class DiscordBot {
     this.workersChannelId = config.workersChannelId;
     this.tokenUsageChannelId = config.tokenUsageChannelId ?? null;
     this.teamsChannelId = config.teamsChannelId ?? null;
+    this.scheduledChannelId = config.scheduledChannelId ?? null;
     this.tokenTracker = new TokenTracker();
     this.notificationSettings = new NotificationSettings();
 
@@ -173,6 +181,11 @@ export class DiscordBot {
 
     // /teams コマンド用のチーム情報プロバイダを設定
     this.commandHandler.teamsProvider = () => this.getActiveTeams();
+
+    // スケジュールマネージャーが設定されていれば渡す
+    if (this.scheduleManager) {
+      this.commandHandler.scheduleManager = this.scheduleManager;
+    }
 
     // ボタンハンドラ初期化
     this.buttonHandler = new ButtonHandler(
@@ -297,6 +310,11 @@ export class DiscordBot {
         if (task.workerId) {
           this.tokenTracker.record(task.id, task.workerId, task.tokenUsage);
           await this.postTokenUsageNotification(task);
+        }
+
+        // スケジューラーからのタスクなら #scheduled チャンネルに結果投稿
+        if (task.requestedBy.startsWith("scheduler:")) {
+          await this.postScheduleResultNotification(task);
         }
       },
       onTaskFailed: async (task) => {
@@ -660,6 +678,61 @@ export class DiscordBot {
       );
     } catch (error) {
       console.error("Failed to post mention notification:", error);
+    }
+  }
+
+  // ─── Schedule 管理 ───
+
+  /**
+   * ScheduleManager を設定する
+   */
+  setScheduleManager(manager: ScheduleManager): void {
+    this.scheduleManager = manager;
+    // コマンドハンドラにも渡す
+    if (this.commandHandler) {
+      this.commandHandler.scheduleManager = manager;
+    }
+  }
+
+  /**
+   * #scheduled チャンネルに定期タスクの結果を投稿する
+   */
+  private async postScheduleResultNotification(task: Task): Promise<void> {
+    if (!this.scheduledChannelId) return;
+
+    try {
+      const channel = this.client.channels.cache.get(this.scheduledChannelId);
+      if (!channel || !channel.isTextBased()) return;
+
+      // requestedBy から jobName を抽出 ("scheduler:朝のAI記事" → "朝のAI記事")
+      const jobName = task.requestedBy.replace("scheduler:", "");
+
+      const embed = buildScheduleResultEmbed(
+        jobName,
+        task.id,
+        task.resultText,
+        task.prompt
+      );
+
+      const msg = await withDiscordRetry(
+        () => (channel as TextChannel).send({ embeds: [embed] }),
+        "postScheduleResultNotification"
+      );
+
+      // 長文の場合はスレッドで全文投稿
+      if (isLongResult(task.resultText) && task.resultText) {
+        const thread = await msg.startThread({
+          name: `${jobName} - ${task.id} Full Output`,
+        });
+        const chunks = splitTextForDiscord(task.resultText);
+        for (let i = 0; i < chunks.length; i++) {
+          const header =
+            chunks.length > 1 ? `**[${i + 1}/${chunks.length}]**\n` : "";
+          await thread.send(header + chunks[i]);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to post schedule result notification:", error);
     }
   }
 
