@@ -187,7 +187,7 @@ export class ClaudeExecutor extends EventEmitter {
     const args: string[] = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
 
     if (options.permissionMode === PermissionMode.Auto) {
-      args.push("--dangerouslySkipPermissions");
+      args.push("--dangerously-skip-permissions");
     }
 
     if (options.sessionId) {
