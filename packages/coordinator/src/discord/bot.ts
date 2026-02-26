@@ -757,14 +757,21 @@ export class DiscordBot {
       // 長文の場合はスレッドで全文投稿
       const fullText = isFailed ? task.errorMessage : task.resultText;
       if (isLongResult(fullText) && fullText) {
-        const thread = await msg.startThread({
-          name: `${jobName} - ${task.id} Full Output`,
-        });
-        const chunks = splitTextForDiscord(fullText, 20);
-        for (let i = 0; i < chunks.length; i++) {
-          const header =
-            chunks.length > 1 ? `**[${i + 1}/${chunks.length}]**\n` : "";
-          await thread.send(header + chunks[i]);
+        try {
+          const thread = await msg.startThread({
+            name: `${jobName} - ${task.id} Full Output`,
+          });
+          const chunks = splitTextForDiscord(fullText, 20);
+          for (let i = 0; i < chunks.length; i++) {
+            const header =
+              chunks.length > 1 ? `**[${i + 1}/${chunks.length}]**\n` : "";
+            await thread.send(header + chunks[i]);
+          }
+        } catch (threadError) {
+          console.error(
+            `Failed to post schedule result to thread (${task.id}):`,
+            threadError
+          );
         }
       }
     } catch (error) {
