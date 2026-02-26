@@ -13,6 +13,7 @@ import {
 } from "discord.js";
 import {
   Task,
+  TaskStatus,
   TaskQuestionPayload,
   TaskPermissionPayload,
   TeamInfo,
@@ -328,6 +329,11 @@ export class DiscordBot {
         if (task.workerId && (task.tokenUsage.inputTokens > 0 || task.tokenUsage.outputTokens > 0)) {
           this.tokenTracker.record(task.id, task.workerId, task.tokenUsage);
           await this.postTokenUsageNotification(task);
+        }
+
+        // スケジューラーからのタスクなら #scheduled チャンネルにもエラー通知
+        if (task.requestedBy.startsWith("scheduler:")) {
+          await this.postScheduleResultNotification(task);
         }
       },
       onTaskCancelled: async (task) => {
@@ -692,6 +698,23 @@ export class DiscordBot {
     if (this.commandHandler) {
       this.commandHandler.scheduleManager = manager;
     }
+
+    // スケジュール実行時に #status にEmbed投稿する
+    manager.onJobExecuted = async (_job, taskId) => {
+      try {
+        const task = this.taskManager.getTask(taskId);
+        if (!task) return;
+
+        const channel = this.client.channels.cache.get(this.statusChannelId);
+        if (channel && channel.isTextBased() && "send" in channel) {
+          const embed = buildTaskEmbed(task);
+          const msg = await (channel as TextChannel).send({ embeds: [embed] });
+          this.taskManager.setDiscordMessageId(taskId, msg.id);
+        }
+      } catch (error) {
+        console.error(`Failed to post scheduled task embed:`, error);
+      }
+    };
   }
 
   /**
@@ -707,12 +730,24 @@ export class DiscordBot {
       // requestedBy から jobName を抽出 ("scheduler:朝のAI記事" → "朝のAI記事")
       const jobName = task.requestedBy.replace("scheduler:", "");
 
+      // 失敗タスクの場合はエラーメッセージを表示
+      const isFailed = task.status === TaskStatus.Failed;
+      const resultText = isFailed
+        ? `**Error:** ${task.errorMessage ?? "Unknown error"}`
+        : task.resultText;
+
       const embed = buildScheduleResultEmbed(
         jobName,
         task.id,
-        task.resultText,
+        resultText,
         task.prompt
       );
+
+      // 失敗時は色とタイトルを変更
+      if (isFailed) {
+        embed.setColor(0xED4245); // Red
+        embed.setTitle(`\u274C Scheduled Failed: ${jobName}`);
+      }
 
       const msg = await withDiscordRetry(
         () => (channel as TextChannel).send({ embeds: [embed] }),
@@ -720,11 +755,12 @@ export class DiscordBot {
       );
 
       // 長文の場合はスレッドで全文投稿
-      if (isLongResult(task.resultText) && task.resultText) {
+      const fullText = isFailed ? task.errorMessage : task.resultText;
+      if (isLongResult(fullText) && fullText) {
         const thread = await msg.startThread({
           name: `${jobName} - ${task.id} Full Output`,
         });
-        const chunks = splitTextForDiscord(task.resultText);
+        const chunks = splitTextForDiscord(fullText);
         for (let i = 0; i < chunks.length; i++) {
           const header =
             chunks.length > 1 ? `**[${i + 1}/${chunks.length}]**\n` : "";
