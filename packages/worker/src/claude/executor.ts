@@ -54,11 +54,13 @@ export class ClaudeExecutor extends EventEmitter {
       throw new Error("ClaudeExecutor is already running");
     }
 
+    const prompt = this.buildPrompt(options);
     const args = this.buildArgs(options);
     this.parser.reset();
     this._running = true;
 
     console.log(`[Executor] Spawning: claude ${args.join(" ")}`);
+    console.log(`[Executor] Prompt length: ${prompt.length} chars`);
     console.log(`[Executor] CWD: ${options.cwd}`);
     if (options.sessionId) {
       console.log(`[Executor] Resuming session: ${options.sessionId}`);
@@ -89,10 +91,11 @@ export class ClaudeExecutor extends EventEmitter {
         shell: process.platform === "win32",
       });
 
-      // stdin パイプを即座に end() して EOF を送信する。
-      // Claude CLI は stdin がパイプだとデータ待ちでハングするため、
-      // EOF を送ることで通常の -p モード実行として進行させる。
-      // 質問応答はセッション継続 (--resume) で対応する。
+      // プロンプトを stdin 経由で渡す。
+      // CLI 引数だと shell: true 時にシェルのメタ文字（括弧等）が
+      // 解釈されてしまうため、stdin で渡すことで OS 差を回避する。
+      // 書き込み後に end() で EOF を送信し、Claude CLI を実行開始させる。
+      this.process.stdin?.write(prompt);
       this.process.stdin?.end();
     } catch (err) {
       this._running = false;
@@ -174,8 +177,8 @@ export class ClaudeExecutor extends EventEmitter {
     console.warn("[Executor] writeStdin is not supported; use session continuation instead");
   }
 
-  /** CLI 引数を組み立てる */
-  private buildArgs(options: ExecuteOptions): string[] {
+  /** stdin 経由で渡すプロンプトを組み立てる */
+  private buildPrompt(options: ExecuteOptions): string {
     let prompt = options.prompt;
 
     // 添付ファイルがある場合、プロンプトにファイルパスを含める
@@ -184,7 +187,12 @@ export class ClaudeExecutor extends EventEmitter {
       prompt = `${prompt}\n\n${fileRefs}`;
     }
 
-    const args: string[] = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+    return prompt;
+  }
+
+  /** CLI 引数を組み立てる（プロンプトは stdin で渡すため含めない） */
+  private buildArgs(options: ExecuteOptions): string[] {
+    const args: string[] = ["-p", "--output-format", "stream-json", "--verbose"];
 
     if (options.permissionMode === PermissionMode.Auto) {
       args.push("--dangerously-skip-permissions");
